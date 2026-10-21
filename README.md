@@ -166,6 +166,8 @@ Patch status is one thing; whether someone already tried is another. The exploit
 - **Oversized or malformed `PHPSESSID` response cookies** (Wiz): one primitive leaves `PS(id)` pointing at freed memory, and a later request URL-encodes reclaimed heap into the `Set-Cookie: PHPSESSID=` it returns — so an abnormally large or garbage session cookie in a **response** is a memory-disclosure signal. It happens even if the app never calls `session_start()`.
 - **Webshell artifacts:** new `.php` files in the webroot, recently-modified PHP, new cron jobs, users or SSH keys.
 
+**A word on leaked PoCs:** several "0-day PoC" repos circulating since the 20th target a different bug entirely, or need extreme, non-default preconditions (a specific distro build's hard-coded memory offsets, a non-default allocator) that make them lab-only proofs, not point-and-shoot exploits. A few researchers (e.g. [@ActiveTK5929](https://twitter.com/ActiveTK5929)) warn that some circulating "0-day" PoCs are malware aimed at script kiddies trying them. Don't run a PoC you haven't read line by line, and never against anything but an isolated lab.
+
 **Impact isn't only RCE.** Wiz describes a memory-disclosure primitive that leaks process heap — passwords, tokens, API keys, certificates, and whatever else was in another request's memory — with no code execution required. On a system handling sensitive data this is a data-exposure incident on its own, even where RCE is never achieved.
 
 The original researcher (Calif) also recommends `memory_limit=-1` as a mitigation for **both** SAPIs (mod_php, and FPM together with `session.upload_progress.enabled=0`) — this is what `harden` applies. Apps named as affected across the writeups (Calif, Wiz): WordPress, Drupal, Joomla, MediaWiki, Roundcube, Magento, phpMyAdmin, Nextcloud, Laravel, Symfony, WHMCS.
@@ -182,6 +184,7 @@ The original researcher (Calif) also recommends `memory_limit=-1` as a mitigatio
 - 13:36 UTC, 21 Oct: PHP released 8.2.35 / 8.3.36 / 8.4.27 / 8.5.12 (earlier than the scheduled 14:00, due to active exploitation). 8.1 and older are EOL — no PHP patch, only distro backports.
 - 14:35 UTC, 21 Oct: exploitation confirmed in the wild **at scale**. watchTowr's Attacker Eye honeypot network observed exploitation of both CVEs, and Hadrian reports attacks "at scale" — mostly through the `session.upload_progress` path (the vector `fix` disables). Earlier the same morning Huntress and watchTowr had seen none; it flipped within hours. Not yet in CISA KEV at time of writing.
 - 21 Oct: PortSwigger shipped PHP2Shell detection for Burp Suite Professional & DAST — ActiveScan++ v2.0.13, Bambda scan checks, and BChecks (CVE-2026-109618 / 109619).
+- 21 Oct, 10:45: NSA Cyber advised immediate effect — organizations running PHP should prepare to patch now, and take the system offline if an immediate update isn't feasible, pending more specific guidance.
 
 ## Links
 
@@ -193,3 +196,5 @@ The original researcher (Calif) also recommends `memory_limit=-1` as a mitigatio
 - https://sansec.io/research/php2shell
 - https://www.huntress.com/blog/php2shell-leaked-critical-php-vulnerabilities
 - https://www.tenable.com/blog/php2shell-cve-2026-109618-cve-2026-109619-frequently-asked-questions-about-critical-php-remote
+- https://github.com/openai/php2shell-checker (fingerprint-only version checker; good for an outside, header-based pass, doesn't see in-host mitigations or distro backports — this repo's `check` is meant to complement it, not replace it)
+- https://php2shell.aikido.io (third-party web checker; default check is fingerprint/timing-only, the opt-in "definitive" check sends a payload that can crash a worker — don't run that against production)
