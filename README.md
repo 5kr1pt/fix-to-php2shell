@@ -163,9 +163,12 @@ Patch status is one thing; whether someone already tried is another. The exploit
 - **Worker crashes during multipart parsing:** `SIGSEGV` / `signal 11` / `Out of memory` fatals in the php-fpm or Apache error log, especially bursts. This is the clearest signal of exploitation attempts against the memory-corruption path.
 - **Post-exploitation ("2shell"):** php-fpm, `apache2` or `httpd` spawning `sh`, `bash`, `curl`, `wget`, `nc`, `python` or `perl`. A shell as a child of a web worker is the payload landing.
 - **Anomalous requests:** `multipart/form-data` POSTs with an unusual number of **deeply-nested, empty-filename file fields** (the OOM amplifier), and chunked or HTTP/2 length-less multipart to endpoints that don't take uploads.
+- **Oversized or malformed `PHPSESSID` response cookies** (Wiz): one primitive leaves `PS(id)` pointing at freed memory, and a later request URL-encodes reclaimed heap into the `Set-Cookie: PHPSESSID=` it returns — so an abnormally large or garbage session cookie in a **response** is a memory-disclosure signal. It happens even if the app never calls `session_start()`.
 - **Webshell artifacts:** new `.php` files in the webroot, recently-modified PHP, new cron jobs, users or SSH keys.
 
-The original researcher (Calif) also recommends `memory_limit=-1` as a mitigation for **both** SAPIs (mod_php, and FPM together with `session.upload_progress.enabled=0`) — this is what `harden` applies. Apps the writeup names as affected: WordPress, Drupal, Joomla, MediaWiki, Roundcube, Magento, phpMyAdmin, Nextcloud, Laravel, Symfony, WHMCS.
+**Impact isn't only RCE.** Wiz describes a memory-disclosure primitive that leaks process heap — passwords, tokens, API keys, certificates, and whatever else was in another request's memory — with no code execution required. On a system handling sensitive data this is a data-exposure incident on its own, even where RCE is never achieved.
+
+The original researcher (Calif) also recommends `memory_limit=-1` as a mitigation for **both** SAPIs (mod_php, and FPM together with `session.upload_progress.enabled=0`) — this is what `harden` applies. Apps named as affected across the writeups (Calif, Wiz): WordPress, Drupal, Joomla, MediaWiki, Roundcube, Magento, phpMyAdmin, Nextcloud, Laravel, Symfony, WHMCS.
 
 ## Timeline
 
@@ -183,6 +186,7 @@ The original researcher (Calif) also recommends `memory_limit=-1` as a mitigatio
 - https://github.com/php/php-src/security/advisories/GHSA-w8hw-w9fx-j79w (CVE-2026-109618)
 - https://github.com/php/php-src/security/advisories/GHSA-6wmf-4rv5-p3rp (CVE-2026-109619)
 - https://calif.io/php2shell/ (the finder's technical writeup)
+- https://wiz.io/blog/php2shell-php-rce (Wiz: co-discoverer, memory-disclosure primitive)
 - https://sansec.io/research/php2shell
 - https://www.huntress.com/blog/php2shell-leaked-critical-php-vulnerabilities
 - https://www.tenable.com/blog/php2shell-cve-2026-109618-cve-2026-109619-frequently-asked-questions-about-critical-php-remote
