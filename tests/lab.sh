@@ -159,14 +159,19 @@ test_all() {
 	for e in $ENVS; do
 		printf '\n== %s (%s)\n' "$e" "$(curl -s "http://127.0.0.1:$(port "$e")/" | head -c 60 | tr -d '\n' | sed 's/<[^>]*>//g')"
 		expect "probe antes do fix"            "$(probe "$e")"          ON
-		expect "check antes do fix (exit)"     "$(script check "$e")"   2
-		expect "fix (exit = check final)"      "$(script fix "$e")"     1
+		expect "check antes do fix (exit)"     "$(script check "$e")"   3
+		expect "fix (exit = check final)"      "$(script fix "$e")"     2
 		expect "probe depois do fix"           "$(probe "$e")"          OFF
 		expect "upload continua funcionando"   "$(upload_ok "$e" && echo sim || echo nao)" sim
 		expect "app responde (HTTP)"           "$(app_code "$e" | sed 's/^302$/200/')" 200
-		expect "check depois do fix (exit)"    "$(script check "$e")"   1
+		expect "check depois do fix (exit)"    "$(script check "$e")"   2
 		expect "undo (exit)"                   "$(script undo "$e")"    0
 		expect "probe depois do undo"          "$(probe "$e")"          ON
+		if [ "$e" = debian ]; then
+			docker exec lab-debian sh -c 'kill "$(cat /run/php/php8.4-fpm.pid)"'; sleep 1
+			expect "check com php-fpm parado (exit)" "$(script check "$e")" 1
+			docker exec lab-debian php-fpm8.4 -D
+		fi
 	done
 	printf '\n%s ok, %s falhas (saídas completas em %s/out-*.txt)\n' "$PASS" "$FAIL" "$LAB"
 	[ "$FAIL" = 0 ]

@@ -7,14 +7,15 @@
 #   sudo ./php2shell.sh docker check|fix|undo [container...]
 #                                                roda o comando dentro dos containers em execução (docker/podman)
 #
-# Código de saída: 0 = corrigido | 1 = vulnerável com mitigação | 2 = vulnerável SEM mitigação | 3 = erro
+# Código de saída: 0 = corrigido | 1 = vulnerável, mas parado ou sem exposição em rede
+#                  2 = vulnerável com mitigação | 3 = vulnerável e exposto | 4 = erro
 #
 # A mitigação é PARCIAL: reduz a exposição, não fecha a falha. Só o patch do PHP resolve.
 # POSIX sh de propósito: roda em Debian/Ubuntu, RHEL/Rocky, Alpine e nas imagens oficiais do Docker.
 
 set -u
 
-SCRIPT_VERSION=2026.10.21-1
+SCRIPT_VERSION=2026.10.21-2
 CVES="CVE-2026-109618 CVE-2026-109619"
 # Versões com a correção, por branch. Até o advisory oficial (21/10/2026 14:00 UTC) são as ESPERADAS.
 # Para sobrescrever sem editar o script: PHP2SHELL_FIXED="8.2.35 8.3.36 8.4.27 8.5.12" ./php2shell.sh check
@@ -33,7 +34,7 @@ fi
 ok()   { printf '  %s✔%s %s\n' "$G" "$N" "$*"; }
 warn() { printf '  %s!%s %s\n' "$Y" "$N" "$*"; }
 bad()  { printf '  %s✘%s %s\n' "$R" "$N" "$*"; }
-die()  { printf '%serro:%s %s\n' "$R" "$N" "$*" >&2; exit 3; }
+die()  { printf '%serro:%s %s\n' "$R" "$N" "$*" >&2; exit 4; }
 
 need_root() { [ "$(id -u)" = 0 ] || die "precisa de root: sudo $0 $*"; }
 
@@ -232,37 +233,93 @@ ini_dirs() {
 	} | sort -u
 }
 
+# ---------- exposição ----------
+
+# endereço|processos de cada porta TCP em LISTEN (ss, ou netstat no busybox)
+listeners() {
+	if command -v ss >/dev/null 2>&1; then
+		ss -ltnp 2>/dev/null | awk '$1 == "LISTEN" { names = ""; s = $0
+			while (match(s, /\("[^"]+"/)) { n = substr(s, RSTART + 2, RLENGTH - 3); s = substr(s, RSTART + RLENGTH)
+				if (index("," names ",", "," n ",") == 0) names = names (names ? "," : "") n }
+			print $4 "|" names }'
+	elif command -v netstat >/dev/null 2>&1; then
+		netstat -ltnp 2>/dev/null | awk '$6 == "LISTEN" { split($7, a, "/"); sub(/:.*/, "", a[2]); print $4 "|" a[2] }'
+	else
+		return 1
+	fi
+}
+
+# processos que recebem HTTP (ou FastCGI) e podem levar a requisição até o PHP
+WEB_PROCS='nginx|apache2|httpd|haproxy|caddy|lighttpd|traefik|envoy|varnishd|lshttpd|litespeed|openlitespeed|frankenphp|php[^,]*|hitch|docker-proxy|rootlessport'
+
+# EXPO = container | ? (não verificado) | local | "0.0.0.0:80 (nginx), ..."
+# Na dúvida fica como exposto: dizer "não exposto" sem ter certeza é o erro perigoso.
+host_exposure() {
+	local l
+	if in_container; then EXPO=container; return; fi
+	if [ "$(id -u)" != 0 ] || ! l=$(listeners); then EXPO='?'; return; fi
+	# portas sem nenhum dono visível = ss sem permissão para ver os processos
+	if [ -n "$l" ] && ! printf '%s\n' "$l" | grep -q '|.'; then EXPO='?'; return; fi
+	EXPO=$(printf '%s\n' "$l" | awk -F'|' -v re="(^|,)($WEB_PROCS)(,|\$)" '
+		$1 !~ /^(127\.|\[::1\]|\[::ffff:127\.|::1:|localhost)/ && $2 ~ re { printf "%s%s (%s)", (n++ ? ", " : ""), $1, $2 }')
+	[ -n "$EXPO" ] || EXPO=local
+}
+
+boot_units() { # units habilitadas no boot que casam com o padrão (só fora de container)
+	in_container && return 0
+	command -v systemctl >/dev/null 2>&1 || return 0
+	systemctl list-unit-files --type=service --no-legend 2>/dev/null |
+		awk -v re="$1" '$1 ~ re && $2 == "enabled" { printf "%s%s", (n++ ? " " : ""), $1 }'
+}
+
+# imprime a linha de exposição; retorna 0 = sem exposição em rede (verificado), 1 = exposto ou não verificado
+expo_status() {
+	case $EXPO in
+	local)     ok "exposição: só localhost/socket nesta máquina (nenhum servidor web escutando na rede)" ;;
+	container) warn "exposição: container, depende das portas publicadas/ingress (não dá para ver daqui)"; return 1 ;;
+	'?')       warn "exposição: não consegui verificar (rode com sudo; precisa de ss ou netstat)"; return 1 ;;
+	*)         bad "exposição: escuta na rede em $EXPO"; return 1 ;;
+	esac
+}
+
 # ---------- check ----------
 
 acc() { FOUND=$((FOUND + 1)); [ "$1" -gt "$WORST" ] && WORST=$1; return 0; }
 
-report() { # rótulo arquivo versão estado-mitigação binário-antigo(0/1)
-	local p m
+report() { # rótulo arquivo versão estado-mitigação binário-antigo(0/1) rodando(0/1) units-no-boot
+	local p m e=1
 	printf '\n%s%s%s\n' "$B" "$1" "$N"
 	patch_status "$2" "$3"; p=$?
 	if [ "$5" = 1 ]; then
 		bad "o processo ainda roda o binário ANTIGO (atualizado em disco sem reiniciar): reinicie o serviço"; p=1
 	fi
 	mitig_status "$4"; m=$?
+	if [ "$6" = 1 ]; then
+		expo_status && e=0
+	else
+		ok "exposição: parado, não atende requisições agora"; e=0
+		[ -n "${7:-}" ] && warn "habilitado no boot ($7): se o serviço subir, volta a ficar exposto"
+	fi
 	[ $p = 0 ] && return 0
-	[ $m = 0 ] && return 1
-	return 2
+	[ $e = 0 ] && return 1
+	[ $m = 0 ] && return 2
+	return 3
 }
 
 report_fpm() { # binário conf pid binário-antigo
-	local v ini eff st
+	local v ini eff st run=0 boot=""
 	v=$(php_version "$1"); ini=$(ini_from_info "$1"); eff=$(fpm_effective "$1" "$2" "$ini")
-	if [ -n "$3" ]; then st="rodando, pid $3"; else st="parado"; fi
-	report "php-fpm $v · $1 · $st" "$1" "$v" "$eff" "$4"
+	if [ -n "$3" ]; then st="rodando, pid $3"; run=1; else st="parado"; boot=$(boot_units 'php.*fpm'); fi
+	report "php-fpm $v · $1 · $st" "$1" "$v" "$eff" "$4" "$run" "$boot"
 }
 
 report_modphp() { # libphp pid binário-antigo
-	local xy v eff st c
+	local xy v eff st c run=0 boot=""
 	xy=$(lib_xy "$1"); c=$(cli_bin "$xy"); v=$([ -n "$c" ] && php_version "$c")
 	if [ -n "$xy" ] && [ -d "/etc/php/$xy/apache2" ]; then eff=$(ini_static "/etc/php/$xy/apache2"); else eff=$(ini_from_info "$c"); fi
 	[ -n "$eff" ] || [ -n "$c" ] || eff="?"
-	if [ -n "$2" ]; then st="Apache rodando, pid $2"; else st="Apache parado"; fi
-	report "mod_php $v · $1 · $st" "$1" "$v" "$eff" "$3"
+	if [ -n "$2" ]; then st="Apache rodando, pid $2"; run=1; else st="Apache parado"; boot=$(boot_units '^(apache2|httpd)[.]service$'); fi
+	report "mod_php $v · $1 · $st" "$1" "$v" "$eff" "$3" "$run" "$boot"
 }
 
 do_check() {
@@ -271,6 +328,7 @@ do_check() {
 	printf '%sPHP2Shell (CVE-2026-109618 / CVE-2026-109619): check%s\n' "$B" "$N"
 	printf 'host %s · %s · script %s\n' "$(cat /proc/sys/kernel/hostname 2>/dev/null)" "$(date '+%Y-%m-%d %H:%M %Z')" "$SCRIPT_VERSION"
 	[ "$(id -u)" = 0 ] || warn "rode com sudo para enxergar todos os processos e configs"
+	host_exposure
 
 	for m in $(fpm_masters); do
 		pid=${m%%|*}; r=${m#*|}; exe=${r%%|*}; conf=${r#*|}; del=0
@@ -308,9 +366,9 @@ do_check() {
 		*"|outro")
 			printf '\n%s%s (pid %s)%s\n' "$B" "${exe%|outro}" "$pid" "$N"
 			bad "SAPI que o script não ajusta sozinho: ponha 'session.upload_progress.enabled = 0' no php.ini dela, reinicie e atualize o PHP"
-			acc 2 ;;
+			acc 3 ;;
 		*)
-			report "php -S (servidor embutido) · $exe · pid $pid" "$exe" "$(php_version "$exe")" "$(ini_from_info "$exe")" 0; acc $? ;;
+			report "php -S (servidor embutido) · $exe · pid $pid" "$exe" "$(php_version "$exe")" "$(ini_from_info "$exe")" 0 1; acc $? ;;
 		esac
 	done
 
@@ -324,7 +382,12 @@ do_check() {
 		ok "PHP corrigido. O fix pode ficar (não atrapalha quase nenhuma aplicação) ou sair com: sudo $self undo"
 	else
 		n=1
-		[ "$WORST" = 2 ] && echo "  $n. Agora: sudo $self fix   (mitigação parcial, NÃO substitui o patch)" && n=2
+		if [ "$WORST" = 1 ]; then
+			echo "  Nada vulnerável atendendo na rede agora (parado ou só local). Mantenha assim até atualizar."
+			echo "  Se precisar religar antes do patch, rode 'sudo $self fix' antes."
+		fi
+		[ "$WORST" = 3 ] && echo "  $n. Agora: sudo $self fix   (reduz o risco, NÃO corrige)" && n=$((n + 1))
+		[ "$WORST" -ge 2 ] && echo "  $n. Se der, tire o serviço da internet até atualizar: o fix sozinho não protege" && n=$((n + 1))
 		if [ "$(date -u +%Y%m%d%H%M)" -lt "$RELEASE_UTC" ]; then
 			echo "  $n. O patch sai às 14:00 UTC (11:00 em Brasília) de 21/10. Assim que sair, atualize:"
 		else
@@ -333,6 +396,11 @@ do_check() {
 		echo "       $(upgrade_hint)"
 		echo "  $((n + 1)). Depois rode de novo: $self check  (tem que dar CORRIGIDO)"
 		[ "$EOL_SEEN" = 1 ] && warn "PHP 8.1 ou mais antigo: o PHP não vai publicar correção. Migre para 8.2+ ou tire da internet (VPN/allowlist)."
+		case $EXPO in
+		container | local | '?') ;;
+		*) [ "$WORST" -ge 2 ] && warn "Tirou o acesso externo no proxy/firewall/DNS? Isso não aparece daqui. A rede interna continua alcançando o serviço, então ele segue como exposto." ;;
+		esac
+		case $EXPO in *php-fpm*) warn "o php-fpm aceita FastCGI direto pela rede: quem alcança essa porta executa PHP, com ou sem esta falha. Deixe só em 127.0.0.1 ou socket." ;; esac
 	fi
 	if in_container && [ "$WORST" != 0 ]; then
 		sd=$(ini_dirs | grep -v '/cli/' | head -n1)
@@ -343,8 +411,9 @@ do_check() {
 
 	case $WORST in
 	0) [ "$FOUND" = 0 ] && r=SEM_PHP_WEB || r=CORRIGIDO ;;
-	1) r=VULNERAVEL_MITIGADO ;;
-	*) r=VULNERAVEL_SEM_MITIGACAO ;;
+	1) r=VULNERAVEL_SEM_EXPOSICAO ;;
+	2) r=VULNERAVEL_MITIGADO ;;
+	*) r=VULNERAVEL_EXPOSTO ;;
 	esac
 	printf '\nRESULTADO: %s\n' "$r"
 	return "$WORST"
@@ -466,7 +535,7 @@ do_docker() {
 	exit "$worst"
 }
 
-usage() { sed -n '2,13p' "$0" 2>/dev/null | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,/^$/p' "$0" 2>/dev/null | sed 's/^# \{0,1\}//'; }
 
 case ${1:-check} in
 check) do_check ;;
@@ -474,5 +543,5 @@ fix) do_fix ;;
 undo) do_undo ;;
 docker) shift; do_docker "$@" ;;
 -h | --help | help) usage ;;
-*) usage; exit 3 ;;
+*) usage; exit 4 ;;
 esac

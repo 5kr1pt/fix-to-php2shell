@@ -52,18 +52,29 @@ Once the patch is out, update PHP (`check` prints the right command for your dis
 The script output is in Portuguese. The last line is always `RESULTADO: ...`, with one of these values:
 
 - `CORRIGIDO`: patched;
-- `VULNERAVEL_MITIGADO`: vulnerable, mitigation applied;
-- `VULNERAVEL_SEM_MITIGACAO`: vulnerable, no mitigation;
+- `VULNERAVEL_SEM_EXPOSICAO`: vulnerable, but stopped or only reachable from localhost;
+- `VULNERAVEL_MITIGADO`: vulnerable and reachable over the network, mitigation applied;
+- `VULNERAVEL_EXPOSTO`: vulnerable, reachable over the network, no mitigation;
 - `SEM_PHP_WEB`: no PHP serving web traffic.
 
 Commands:
 
-- `check`: lists every PHP that serves web traffic (php-fpm, mod_php, `php -S`), with its version, whether it's patched and whether the mitigation is active. Changes nothing.
+- `check`: lists every PHP that serves web traffic (php-fpm, mod_php, `php -S`), with its version, whether it's patched, whether the mitigation is active, and whether it's running and listening on the network. Changes nothing.
 - `fix`: writes `zz-php2shell.ini` to every PHP `conf.d`, tests the config and reloads php-fpm and Apache.
 - `undo`: removes what `fix` created and reloads.
 - `docker check|fix|undo [container...]`: runs inside containers (docker or podman). With no names it goes through every running container that has PHP.
 
-Exit codes: 0 patched, 1 vulnerable but mitigated, 2 vulnerable without mitigation, 3 error.
+Exit codes, from lowest to highest risk:
+
+- 0: patched;
+- 1: vulnerable, but stopped or localhost only;
+- 2: vulnerable, mitigated;
+- 3: vulnerable and exposed;
+- 4: error.
+
+Since the ini change isn't a fix, a stopped service or one that only listens on localhost counts as lower risk than a mitigated one.
+
+The network check only sees the host itself. If you removed external access at the proxy, firewall or DNS, the script can't tell. The internal network can still reach the service, so it stays `EXPOSTO`. That's on purpose.
 
 Works on Debian/Ubuntu, RHEL/Rocky/Alma, Alpine, the official `php:*` images, Remi, cPanel, Plesk and CloudLinux.
 
@@ -71,6 +82,8 @@ On Ubuntu the version doesn't change with the patch (it stays `8.3.6`), so the s
 
 - a pool forces `upload_progress = On`;
 - the process is still running the old binary after an upgrade;
+- the service is stopped but enabled at boot;
+- php-fpm accepts FastCGI straight from the network (e.g. `0.0.0.0:9000`);
 - the version is 8.1 or older, which won't get a PHP patch.
 
 ## Docker and Kubernetes
@@ -120,6 +133,8 @@ Tested on:
 - Debian with systemd
 
 On all of them the feature was on before and turned off after `fix`. The app and file uploads kept working, and `undo` turned the feature back on.
+
+The network check was tested with nginx on `0.0.0.0` and on `127.0.0.1`, php-fpm stopped (enabled and disabled at boot) and php-fpm listening on `0.0.0.0:9000`.
 
 The test doesn't trust `ini_get()`. It sends a multipart POST with `PHP_SESSION_UPLOAD_PROGRESS` and checks whether PHP wrote the session file to disk. That happens before any application code runs, even on Laravel, which doesn't use native PHP sessions at all.
 
