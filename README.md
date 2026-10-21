@@ -130,8 +130,11 @@ If you can't update right away, take the service off the internet (VPN, allowlis
 
 Worth looking for signs of compromise since the 20th: php-fpm or apache spawning `sh`, `curl`, `wget` or `nc`; new `.php` files in the webroot; new cron jobs or users; `SIGSEGV` in the php-fpm log.
 
-## Links
+- 08:20: Cloudflare says they're already seeing early attacks against the two leaked PHP RCE bugs (CVE-2026-109618 and CVE-2026-109619). WAF rules are live for all plans, including free, but he calls it a stopgap.
+<img width="732" height="592" alt="image" src="https://github.com/user-attachments/assets/057883fc-6862-42fb-9811-1d960adecf6e" />
 
+## Links
+https://www.php.net/
 - https://www.php.net/
 - https://sansec.io/research/php2shell
 - https://www.huntress.com/blog/php2shell-leaked-critical-php-vulnerabilities
