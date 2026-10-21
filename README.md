@@ -2,22 +2,22 @@
 
 CVE-2026-109618 and CVE-2026-109619
 
-Script pra checar se o PHP de um servidor está exposto ao PHP2Shell e aplicar a mitigação temporária (desligar `session.upload_progress`) até o patch sair.
+A script to check whether a server's PHP is exposed to PHP2Shell and to apply the temporary mitigation (turning off `session.upload_progress`) until the patch is out.
 
-Isso não corrige a falha. Um dos release managers do PHP 8.6 já avisou no r/PHP que só o ini não protege e que tem que atualizar o PHP:
+This does not fix the bug. One of the PHP 8.6 release managers already said on r/PHP that the ini change alone won't protect you and that you need to update PHP:
 
-<img src="img/release-manager-reddit.png" alt="Release manager do PHP 8.6 no r/PHP: INI files alone won't protect you. You need to update PHP." width="600" />
+<img src="img/release-manager-reddit.png" alt="PHP 8.6 release manager on r/PHP: INI files alone won't protect you. You need to update PHP." width="600" />
 
 Thread: https://www.reddit.com/r/PHP/comments/1xb2utu/upcoming_critical_php_security_release/
 
-Então o ini serve pra reduzir a superfície enquanto o patch não sai. Depois o script serve pra confirmar que o servidor foi atualizado.
+So the ini change is only there to shrink the attack surface until the patch lands. After that, use the script to confirm the server was actually updated.
 
-O patch sai hoje, 21/10, às 14:00 UTC (11:00 de Brasília):
+The patch is due today, October 21, at 14:00 UTC:
 
 <img width="1329" height="597" alt="image" src="https://github.com/user-attachments/assets/2e7b2b83-9bbb-4515-a393-32abe2322c72" />
 
 <details>
-<summary>Texto do aviso</summary>
+<summary>Announcement text</summary>
 
 > Upcoming Critical PHP Security Release
 >
@@ -37,9 +37,9 @@ O patch sai hoje, 21/10, às 14:00 UTC (11:00 de Brasília):
 
 </details>
 
-Fonte: https://news-web.php.net/php.announce/509
+Source: https://news-web.php.net/php.announce/509
 
-## Como usar
+## Usage
 
 ```sh
 curl -fsSLO https://raw.githubusercontent.com/5kr1pt/fix-to-php2shell/main/php2shell.sh
@@ -47,34 +47,41 @@ sh php2shell.sh check
 sudo sh php2shell.sh fix
 ```
 
-Quando o patch sair, atualize o PHP (o `check` mostra o comando certo pra sua distro) e rode o `check` de novo. Tem que aparecer `RESULTADO: CORRIGIDO`.
+Once the patch is out, update PHP (`check` prints the right command for your distro) and run `check` again. It should end with `RESULTADO: CORRIGIDO`.
 
-Comandos:
+The script output is in Portuguese. The last line is always `RESULTADO: ...`, with one of these values:
 
-- `check`: lista cada PHP que atende web (php-fpm, mod_php, `php -S`), com versão, se já tem o patch e se a mitigação está ativa. Não altera nada.
-- `fix`: cria `zz-php2shell.ini` nos `conf.d` do PHP, testa a config e recarrega o php-fpm e o Apache.
-- `undo`: remove o que o `fix` criou e recarrega.
-- `docker check|fix|undo [container...]`: roda dentro dos containers (docker ou podman). Sem nome, passa por todos que têm PHP.
+- `CORRIGIDO`: patched;
+- `VULNERAVEL_MITIGADO`: vulnerable, mitigation applied;
+- `VULNERAVEL_SEM_MITIGACAO`: vulnerable, no mitigation;
+- `SEM_PHP_WEB`: no PHP serving web traffic.
 
-Exit code: 0 corrigido, 1 vulnerável mas mitigado, 2 vulnerável sem mitigação, 3 erro.
+Commands:
 
-Funciona em Debian/Ubuntu, RHEL/Rocky/Alma, Alpine, imagens oficiais `php:*`, Remi, cPanel, Plesk e CloudLinux.
+- `check`: lists every PHP that serves web traffic (php-fpm, mod_php, `php -S`), with its version, whether it's patched and whether the mitigation is active. Changes nothing.
+- `fix`: writes `zz-php2shell.ini` to every PHP `conf.d`, tests the config and reloads php-fpm and Apache.
+- `undo`: removes what `fix` created and reloads.
+- `docker check|fix|undo [container...]`: runs inside containers (docker or podman). With no names it goes through every running container that has PHP.
 
-No Ubuntu a versão não muda com o patch (continua `8.3.6`), então o script procura os CVEs no changelog do pacote. Ele também avisa quando:
+Exit codes: 0 patched, 1 vulnerable but mitigated, 2 vulnerable without mitigation, 3 error.
 
-- algum pool força `upload_progress = On`;
-- o processo continua rodando o binário antigo depois do upgrade;
-- a versão é 8.1 ou anterior, que não vai ter patch do PHP.
+Works on Debian/Ubuntu, RHEL/Rocky/Alma, Alpine, the official `php:*` images, Remi, cPanel, Plesk and CloudLinux.
 
-## Docker e Kubernetes
+On Ubuntu the version doesn't change with the patch (it stays `8.3.6`), so the script looks for the CVE IDs in the package changelog. It also warns when:
 
-O `docker fix` some quando o container é recriado. Pra valer, coloque no Dockerfile:
+- a pool forces `upload_progress = On`;
+- the process is still running the old binary after an upgrade;
+- the version is 8.1 or older, which won't get a PHP patch.
+
+## Docker and Kubernetes
+
+`docker fix` is gone as soon as the container is recreated. To make it stick, add this to the Dockerfile:
 
 ```dockerfile
 RUN echo 'session.upload_progress.enabled = 0' > "$PHP_INI_DIR/conf.d/zz-php2shell.ini"
 ```
 
-No Kubernetes dá pra montar via ConfigMap sem rebuild:
+On Kubernetes you can mount it from a ConfigMap without rebuilding:
 
 ```yaml
 apiVersion: v1
@@ -87,7 +94,7 @@ data:
 ```
 
 ```yaml
-# no container PHP do Deployment
+# in the PHP container of the Deployment
 volumeMounts:
   - name: php2shell
     mountPath: /usr/local/etc/php/conf.d/zz-php2shell.ini
@@ -98,45 +105,45 @@ volumes:
       name: php2shell-mitigation
 ```
 
-Depois rode `kubectl rollout restart deploy/<app>`. Pro patch, atualize a imagem base e faça o build de novo.
+Then run `kubectl rollout restart deploy/<app>`. For the patch itself, update the base image and rebuild.
 
-## Testes
+## Tests
 
-Ambientes testados:
+Tested on:
 
 - Laravel 13 (`php:8.4-fpm` + nginx)
 - WordPress (`wordpress:php8.3-apache`)
-- Debian 13 com php-fpm
-- Ubuntu 24.04 com Apache + mod_php
-- Rocky 9 com httpd + php-fpm
+- Debian 13 with php-fpm
+- Ubuntu 24.04 with Apache + mod_php
+- Rocky 9 with httpd + php-fpm
 - Alpine (`php:8.3-fpm-alpine`)
-- Debian com systemd
+- Debian with systemd
 
-Em todos, o recurso estava ativo antes e desligou com o `fix`. A aplicação e o upload continuaram funcionando, e o `undo` religou o recurso.
+On all of them the feature was on before and turned off after `fix`. The app and file uploads kept working, and `undo` turned the feature back on.
 
-O teste não confia no `ini_get()`. Ele manda um POST multipart com `PHP_SESSION_UPLOAD_PROGRESS` e confere se o PHP gravou o arquivo de sessão no disco. Isso acontece antes do código da aplicação, até no Laravel, que nem usa a sessão nativa do PHP.
+The test doesn't trust `ini_get()`. It sends a multipart POST with `PHP_SESSION_UPLOAD_PROGRESS` and checks whether PHP wrote the session file to disk. That happens before any application code runs, even on Laravel, which doesn't use native PHP sessions at all.
 
-Isso mostra que a mitigação foi aplicada, não que ela segura o exploit. Ainda não tem PoC confiável publicado.
+This shows the mitigation was applied, not that it stops the exploit. There's no reliable public PoC yet.
 
 ```sh
 tests/lab.sh up && tests/lab.sh test && tests/lab.sh down
 ```
 
-## O que se sabe até agora
+## What we know so far
 
-- São duas RCEs no core do PHP, CVSS 9.2. Os detalhes vazaram no dia 20, antes do embargo.
-- O vetor não foi confirmado. A análise pública aponta pro upload progress da sessão em POST multipart, sem autenticação. Tem gente dizendo que existe outro caminho pelo parser de multipart, o que bate com o ini não ser suficiente.
-- Cloudflare e Patchstack relatam ataques desde a manhã do dia 21.
-- Versões corrigidas esperadas: 8.2.35, 8.3.36, 8.4.27 e 8.5.12. Atualizo aqui quando sair o advisory. Da 8.1 pra baixo não vai ter patch do PHP, só backport da distro.
+- Two RCEs in PHP core, CVSS 9.2. Details leaked on the 20th, before the embargo ended.
+- The vector hasn't been confirmed. Public analysis points to session upload progress handling in multipart POSTs, with no auth needed. Some researchers say there's a second path through the multipart parser, which would explain why the ini change isn't enough.
+- Cloudflare and Patchstack report attacks since the morning of the 21st.
+- Expected fixed versions: 8.2.35, 8.3.36, 8.4.27 and 8.5.12. I'll update this once the advisory is out. 8.1 and older won't get a PHP patch, only distro backports.
 
-Se não der pra atualizar logo, tire o serviço da internet (VPN, allowlist). WAF só ajuda se a origem aceitar tráfego só dele.
+If you can't update right away, take the service off the internet (VPN, allowlist). A WAF only helps if the origin accepts traffic from the WAF alone.
 
-Vale procurar sinais de comprometimento desde o dia 20:
+Worth looking for signs of compromise since the 20th:
 
-- php-fpm ou apache abrindo `sh`, `curl`, `wget` ou `nc`;
-- `.php` novo no webroot;
-- cron ou usuário novo;
-- `SIGSEGV` no log do php-fpm.
+- php-fpm or apache spawning `sh`, `curl`, `wget` or `nc`;
+- new `.php` files in the webroot;
+- new cron jobs or users;
+- `SIGSEGV` in the php-fpm log.
 
 ## Links
 
