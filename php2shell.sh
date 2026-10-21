@@ -19,7 +19,7 @@
 
 set -u
 
-SCRIPT_VERSION=2026.10.21-3
+SCRIPT_VERSION=2026.10.21-4
 CVES="CVE-2026-109618 CVE-2026-109619"
 # Versões com a correção, por branch. Até o advisory oficial (21/10/2026 14:00 UTC) são as ESPERADAS.
 # Para sobrescrever sem editar o script: PHP2SHELL_FIXED="8.2.35 8.3.36 8.4.27 8.5.12" ./php2shell.sh check
@@ -46,6 +46,16 @@ need_root() { [ "$(id -u)" = 0 ] || die "precisa de root: sudo $0 $*"; }
 in_container() {
 	[ -f /.dockerenv ] || [ -f /run/.containerenv ] || [ -n "${KUBERNETES_SERVICE_HOST:-}" ] ||
 		grep -qE 'docker|kubepods|containerd|libpod' /proc/1/cgroup 2>/dev/null
+}
+
+# No host, os php-fpm dos containers aparecem no /proc mas não dá para versioná-los daqui.
+# same_ns retorna 0 (mesma máquina, ou não deu para saber: mantém) e 1 só quando confirma
+# que o processo está em outro mount namespace -> é um container, trata com 'docker check'.
+SELF_MNT=$(readlink /proc/self/ns/mnt 2>/dev/null)
+same_ns() {
+	local m
+	m=$(readlink "/proc/$1/ns/mnt" 2>/dev/null)
+	[ -z "$m" ] || [ -z "$SELF_MNT" ] || [ "$m" = "$SELF_MNT" ]
 }
 
 # ---------- versões ----------
@@ -328,7 +338,7 @@ report_modphp() { # libphp pid binário-antigo
 }
 
 do_check() {
-	local m pid r exe conf del b a lib seen="" aseen="" self=php2shell.sh sd n
+	local m pid r exe conf del b a lib seen="" aseen="" self=php2shell.sh sd n cskip=0
 	WORST=0 FOUND=0 EOL_SEEN=0
 	printf '%sPHP2Shell (CVE-2026-109618 / CVE-2026-109619): check%s\n' "$B" "$N"
 	printf 'host %s · %s · script %s\n' "$(cat /proc/sys/kernel/hostname 2>/dev/null)" "$(date '+%Y-%m-%d %H:%M %Z')" "$SCRIPT_VERSION"
@@ -337,6 +347,7 @@ do_check() {
 
 	for m in $(fpm_masters); do
 		pid=${m%%|*}; r=${m#*|}; exe=${r%%|*}; conf=${r#*|}; del=0
+		same_ns "$pid" || { cskip=$((cskip + 1)); continue; }
 		case $exe in *#deleted) del=1; exe=${exe%#deleted} ;; esac
 		report_fpm "$exe" "$conf" "$pid" "$del"; acc $?
 		seen="$seen $exe "
@@ -349,6 +360,7 @@ do_check() {
 
 	for a in $(apache_modphp); do
 		pid=${a%%|*}; lib=${a#*|}; del=0
+		same_ns "$pid" || { cskip=$((cskip + 1)); continue; }
 		case $lib in *#deleted) del=1; lib=${lib%#deleted} ;; esac
 		report_modphp "$lib" "$pid" "$del"; acc $?
 		aseen="$aseen $lib "
@@ -379,6 +391,8 @@ do_check() {
 
 	b=$(list_bins | grep -v '/php-fpm' | tr '\n' ' ')
 	[ -n "$b" ] && printf '\n%sCLI%s (não atende requisições web, só referência): %s\n' "$B" "$N" "$b"
+
+	[ "$cskip" -gt 0 ] && printf '\n  %s!%s %s processo(s) PHP em containers deste host foram ignorados (não dá para versioná-los daqui). Cheque-os por dentro: sudo %s docker check\n' "$Y" "$N" "$cskip" "$self"
 
 	printf '\n%sO que fazer agora%s\n' "$B" "$N"
 	if [ "$FOUND" = 0 ]; then
@@ -429,8 +443,9 @@ upgrade_hint() {
 	if in_container && [ -x /usr/local/bin/php ] && ! distro_owned /usr/local/bin/php; then
 		echo "imagem oficial do PHP: atualize a imagem base e refaça o build"
 	elif command -v dpkg-query >/dev/null 2>&1; then
+		# só o runtime do PHP: "php" + opcional versão + "-componente" (exclui phpggc, phpmyadmin, phpunit...)
 		pkgs=$(dpkg-query -W -f='${db:Status-Abbrev}|${Package}\n' 'php*' 'libapache2-mod-php*' 2>/dev/null |
-			awk -F'|' '$1 ~ /^ii/ { printf "%s ", $2 }')
+			awk -F'|' '$1 ~ /^ii/ && $2 ~ /^(php([0-9.]+)?(-|$)|libapache2-mod-php)/ { printf "%s ", $2 }')
 		echo "sudo apt-get update && sudo apt-get install --only-upgrade $pkgs"
 	elif command -v dnf >/dev/null 2>&1; then echo "sudo dnf upgrade 'php*'"
 	elif command -v yum >/dev/null 2>&1; then echo "sudo yum update 'php*'"
