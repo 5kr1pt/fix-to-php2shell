@@ -4,48 +4,58 @@ CVE-2026-109618 and CVE-2026-109619
 
 A script to check whether a server's PHP is exposed to PHP2Shell, apply the temporary mitigations, and confirm the patch once it's installed.
 
+**The patch is out** (released 21 Oct 2026, 13:36 UTC). Fixed versions: **8.2.35, 8.3.36, 8.4.27, 8.5.12**. Updating PHP is the only complete fix — the mitigations below only shrink the attack surface until you can patch.
+
 ## Quick start
 
 ```sh
 curl -fsSLO https://raw.githubusercontent.com/5kr1pt/fix-to-php2shell/main/php2shell.sh
 
 sh php2shell.sh check        # diagnosis only, changes nothing
-sudo sh php2shell.sh fix     # mitigation: turn off session.upload_progress and reload
+# update PHP (check prints the exact command for your distro), then:
+sh php2shell.sh check        # must end with RESULTADO: CORRIGIDO
 ```
 
-After the patch is out, update PHP (`check` prints the exact command for your distro) and run `check` again. It should end with `RESULTADO: CORRIGIDO`.
+If you genuinely can't patch this minute, apply a stopgap (`block` is the broader one, see below), then patch as soon as you can.
 
 ## Commands
 
 | Command | What it does | Root? |
 |---|---|---|
 | `check` | Lists every PHP serving web traffic (php-fpm, mod_php, `php -S`) with version, patch status, mitigation status, and whether it's running and reachable on the network. **Changes nothing.** | no |
-| `fix` | Writes `session.upload_progress.enabled = 0` to every PHP `conf.d`, tests the config and reloads php-fpm and Apache. | yes |
+| `fix` | Writes the ini mitigation (`session.upload_progress.enabled = 0`, plus `fatal_error_backtraces = 0` for 8.5) to every PHP `conf.d`, tests the config and reloads php-fpm and Apache. **Partial — see below.** | yes |
 | `undo` | Removes what `fix` created and reloads. | yes |
-| `block` | **Optional, stronger.** Blocks multipart POST requests at Apache/nginx. Cuts more of the attack surface but **breaks file uploads** unless you allowlist paths. | yes |
+| `block` | **Broader stopgap.** Blocks multipart POST requests at Apache/nginx. Covers the entry vector for *both* CVEs but **breaks file uploads** unless you allowlist paths. | yes |
 | `unblock` | Removes the multipart block. | yes |
 | `docker <cmd> [container...]` | Runs any of the above inside running containers (docker or podman). No names = every running container with PHP. | — |
 
 Exit codes, from lowest to highest risk: `0` patched · `1` vulnerable but stopped or localhost only · `2` vulnerable, mitigated · `3` vulnerable and exposed · `4` error. The last line is always `RESULTADO: <status>`.
 
-> **Important:** none of these commands *fix* the bug. One of the PHP 8.6 release managers said on r/PHP that the ini change alone won't protect you and that you need to update PHP. The mitigations only shrink the attack surface until you can patch.
+> **Important:** none of these commands *fix* the bug. One of the PHP 8.6 release managers said on r/PHP that the ini change alone won't protect you and that you need to update PHP. The official advisories say the same: updating is "the only reliable mitigation".
 >
 > <img src="img/release-manager-reddit.png" alt="PHP 8.6 release manager on r/PHP: INI files alone won't protect you. You need to update PHP." width="520" />
 >
 > Thread: https://www.reddit.com/r/PHP/comments/1xb2utu/upcoming_critical_php_security_release/
 
-## `fix` — disable session.upload_progress
+## The two bugs (from the official advisories)
 
-This is the low-risk mitigation. It turns off `session.upload_progress`, a feature almost no application uses, so uploads and forms keep working. It targets the path every public analysis (including the leaked write-up) points to, which needs that feature on. It does **not** cover a possible second path through the multipart parser.
+Both are **unauthenticated memory-corruption RCEs** in PHP core (CWE-416, use-after-free), reached while PHP parses a `multipart/form-data` request **before any application code runs** — so every PHP app is in scope regardless of framework. This is **not** application deserialization.
+
+- **CVE-2026-109618 — OOM corruption** ([GHSA-w8hw-w9fx-j79w](https://github.com/php/php-src/security/advisories/GHSA-w8hw-w9fx-j79w)): PHP uses `longjmp()` to bail out on out-of-memory. At certain points request memory is reachable before it's fully initialised; if an allocation fails there, request shutdown reads memory in an invalid state. Triggered by multipart OOM (parts without a usable content-length, unlimited headers per part, empty file controls with nested names). **mod_php is the confirmed vector.** It does **not** need `session.upload_progress`.
+- **CVE-2026-109619 — stale global state** ([GHSA-6wmf-4rv5-p3rp](https://github.com/php/php-src/security/advisories/GHSA-6wmf-4rv5-p3rp)): worker globals (error, session, object state) keep pointing at memory owned by a request that's already gone. A fatal error (including OOM) interrupts an operation before its reset runs; a later request on the same worker uses the stale state. Confirmed producers: `fatal_error_backtraces` on 8.5, and the session **upload-progress** path (enabled by default, no `session_start()` needed).
+
+## `fix` — ini mitigation (partial)
+
+`fix` writes `session.upload_progress.enabled = 0` and `fatal_error_backtraces = 0`. These are cheap (almost no app uses them, uploads keep working), and they are listed in the CVE-2026-109619 advisory as partial mitigations — they remove two confirmed paths for that bug. **They do nothing for CVE-2026-109618 (OOM), which needs neither feature.** So `fix` alone is not enough; use `block` for broader coverage and patch as soon as you can.
 
 ```sh
 sudo sh php2shell.sh fix      # apply
 sudo sh php2shell.sh undo     # revert
 ```
 
-## `block` — reject multipart POSTs (optional, stronger)
+## `block` — reject multipart POSTs (broader stopgap)
 
-If a system can't be patched or taken offline yet, you can block `multipart/form-data` POSTs at the web server. This also covers the multipart-parser path, but **it breaks every upload** unless you allowlist the paths that need them.
+Both CVEs are reached through multipart request parsing, so rejecting `multipart/form-data` POSTs at the web server cuts the entry vector for both. But **it breaks every upload** unless you allowlist the paths that need them.
 
 ```sh
 # block everything (no uploads anywhere):
@@ -63,10 +73,10 @@ sudo sh php2shell.sh unblock   # revert
 
 ## Docker and Kubernetes
 
-`docker fix`/`docker block` are gone as soon as a container is recreated. To make `fix` stick, add this to the Dockerfile:
+`docker fix`/`docker block` are gone as soon as a container is recreated. The real fix is updating the base image once it carries 8.2.35 / 8.3.36 / 8.4.27 / 8.5.12, then rebuild and redeploy. For a stopgap that survives a recreate, bake the ini in:
 
 ```dockerfile
-RUN echo 'session.upload_progress.enabled = 0' > "$PHP_INI_DIR/conf.d/zz-php2shell.ini"
+RUN { echo 'session.upload_progress.enabled = 0'; echo 'fatal_error_backtraces = 0'; } > "$PHP_INI_DIR/conf.d/zz-php2shell.ini"
 ```
 
 On Kubernetes you can mount it from a ConfigMap without rebuilding:
@@ -79,6 +89,7 @@ metadata:
 data:
   zz-php2shell.ini: |
     session.upload_progress.enabled = 0
+    fatal_error_backtraces = 0
 ```
 
 ```yaml
@@ -93,7 +104,7 @@ volumes:
       name: php2shell-mitigation
 ```
 
-Then run `kubectl rollout restart deploy/<app>`. For the patch itself, update the base image and rebuild.
+Then run `kubectl rollout restart deploy/<app>`.
 
 ## Coverage
 
@@ -111,31 +122,29 @@ On Ubuntu the version doesn't change with the patch (it stays `8.3.6`), so the s
 
 ## Tests
 
-Tested on Laravel 13 (`php:8.4-fpm` + nginx), WordPress (`wordpress:php8.3-apache`), Debian 13 with php-fpm, Ubuntu 24.04 with Apache + mod_php, Rocky 9 with httpd + php-fpm, Alpine (`php:8.3-fpm-alpine`) and Debian with systemd.
+Tested on Laravel 13 (`php:8.4-fpm` + nginx), WordPress (`wordpress:php8.3-apache`), Debian 13 with php-fpm, Ubuntu 24.04 with Apache + mod_php, Rocky 9 with httpd + php-fpm, Alpine (`php:8.3-fpm-alpine`) and Debian with systemd. `check` was also validated against a PHP 8.4.27 build from source (reports `CORRIGIDO`).
 
-The test doesn't trust `ini_get()`. For `fix`, it sends a multipart POST with `PHP_SESSION_UPLOAD_PROGRESS` and checks whether PHP wrote the session file to disk — which happens before any application code, even on Laravel. For `block`, it confirms a multipart POST gets a 403, an allowlisted path still accepts uploads, and the rest of the site keeps working. This shows the mitigations are applied, not that they stop the exploit. There's no reliable public PoC.
+The test doesn't trust `ini_get()`. For `fix`, it sends a multipart POST with `PHP_SESSION_UPLOAD_PROGRESS` and checks whether PHP wrote the session file to disk — which happens before any application code, even on Laravel. For `block`, it confirms a multipart POST gets a 403, an allowlisted path still accepts uploads, and the rest of the site keeps working. This verifies the mitigations are applied and the patch verdict is correct — it is not an exploit. Don't run the "PoCs" circulating on X and random sites; many carry malware.
 
 ```sh
 tests/lab.sh up && tests/lab.sh test && tests/lab.sh down
 ```
 
-## What we know so far
+## Timeline
 
-- Two RCEs in PHP core, CVSS 9.2. Details leaked on the 20th, before the embargo ended.
-- The vector hasn't been confirmed. Public analysis points to session upload progress handling in multipart POSTs, with no auth needed. Some researchers say there's a second path through the multipart parser, which would explain why the ini change isn't enough.
-- Cloudflare and Patchstack report attacks since the morning of the 21st.
-- Expected fixed versions: 8.2.35, 8.3.36, 8.4.27 and 8.5.12. I'll update this once the advisory is out. 8.1 and older won't get a PHP patch, only distro backports.
+- Two unauthenticated RCEs in PHP core, CVSS v4.0 9.2 each. Details leaked on 20 Oct, before the embargo ended.
+- Cloudflare and Patchstack reported attacks from the morning of the 21st.
+- 08:20 (local): Cloudflare says they're already seeing early attacks against the two leaked bugs. WAF rules are live for all plans, including free, but they call it a stopgap.
 
-If you can't update right away, take the service off the internet (VPN, allowlist). A WAF only helps if the origin accepts traffic from the WAF alone. And don't download or run the "PoCs" circulating on X and random sites — many carry malware.
-
-Worth looking for signs of compromise since the 20th: php-fpm or apache spawning `sh`, `curl`, `wget` or `nc`; new `.php` files in the webroot; new cron jobs or users; `SIGSEGV` in the php-fpm log.
-
-- 08:20: Cloudflare says they're already seeing early attacks against the two leaked PHP RCE bugs (CVE-2026-109618 and CVE-2026-109619). WAF rules are live for all plans, including free, but he calls it a stopgap.
 <img width="732" height="592" alt="image" src="https://github.com/user-attachments/assets/057883fc-6862-42fb-9811-1d960adecf6e" />
 
+- 13:36 UTC, 21 Oct: PHP released 8.2.35 / 8.3.36 / 8.4.27 / 8.5.12 (earlier than the scheduled 14:00, due to active exploitation). 8.1 and older are EOL — no PHP patch, only distro backports.
+
 ## Links
+
 - https://www.php.net/
+- https://github.com/php/php-src/security/advisories/GHSA-w8hw-w9fx-j79w (CVE-2026-109618)
+- https://github.com/php/php-src/security/advisories/GHSA-6wmf-4rv5-p3rp (CVE-2026-109619)
 - https://sansec.io/research/php2shell
 - https://www.huntress.com/blog/php2shell-leaked-critical-php-vulnerabilities
-- https://patchstack.com/articles/php-major-vulnerability-alert-10-2026/
 - https://www.tenable.com/blog/php2shell-cve-2026-109618-cve-2026-109619-frequently-asked-questions-about-critical-php-remote

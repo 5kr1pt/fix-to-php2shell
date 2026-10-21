@@ -19,13 +19,13 @@
 
 set -u
 
-SCRIPT_VERSION=2026.10.21-4
+SCRIPT_VERSION=2026.10.21-5
 CVES="CVE-2026-109618 CVE-2026-109619"
-# Versões com a correção, por branch. Até o advisory oficial (21/10/2026 14:00 UTC) são as ESPERADAS.
+# Versões com a correção, por branch. Confirmadas no advisory (release saiu 21/10/2026 13:36 UTC).
 # Para sobrescrever sem editar o script: PHP2SHELL_FIXED="8.2.35 8.3.36 8.4.27 8.5.12" ./php2shell.sh check
 FIXED=${PHP2SHELL_FIXED:-"8.2.35 8.3.36 8.4.27 8.5.12"}
-FIXED_CONFIRMED=0
-RELEASE_UTC=202610211400
+FIXED_CONFIRMED=1
+RELEASE_UTC=202610211336
 INI_NAME=zz-php2shell.ini
 BLOCK_NAME=php2shell-block.conf
 TAG=php2shell.sh
@@ -459,9 +459,12 @@ upgrade_hint() {
 write_ini() {
 	cat > "$1" <<EOF
 ; $TAG - PHP2Shell (CVE-2026-109618 / CVE-2026-109619) - $(date '+%Y-%m-%d %H:%M %Z')
-; Mitigacao PARCIAL e temporaria: NAO substitui o patch do PHP.
-; Para remover: php2shell.sh undo  (ou apague este arquivo e recarregue o PHP)
+; Mitigacao PARCIAL: cobre so consumidores da CVE-2026-109619; NAO cobre a 109618 (OOM).
+; So o patch do PHP fecha de verdade. Para remover: php2shell.sh undo
+; desliga o consumidor "upload progress" do estado podre (GHSA-6wmf-4rv5-p3rp)
 session.upload_progress.enabled = 0
+; remove o produtor de RCE confirmado no PHP 8.5 (ignorado nas versoes que nao tem esta diretiva)
+fatal_error_backtraces = 0
 EOF
 }
 
