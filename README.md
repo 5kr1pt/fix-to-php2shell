@@ -34,6 +34,8 @@ If you genuinely can't patch this minute, apply a stopgap (`block` is the broade
 | `undo` | Removes what `fix` created and reloads. | yes |
 | `block` | **Broader stopgap.** Blocks multipart POST requests at Apache/nginx. Covers the entry vector for *both* CVEs but **breaks file uploads** unless you allowlist paths. | yes |
 | `unblock` | Removes the multipart block. | yes |
+| `harden` | **Opt-in, for CVE-2026-109618 (OOM).** Sets `memory_limit=-1` + `post_max_size` via `php_admin_value` (FPM pool / Apache). Higher risk — see below. | yes |
+| `unharden` | Removes the harden config. | yes |
 | `docker <cmd> [container...]` | Runs any of the above inside running containers (docker or podman). No names = every running container with PHP. | — |
 
 Exit codes, from lowest to highest risk: `0` patched · `1` vulnerable but stopped or localhost only · `2` vulnerable, mitigated · `3` vulnerable and exposed · `4` error. The last line is always `RESULTADO: <status>`.
@@ -53,7 +55,7 @@ Both are **unauthenticated memory-corruption RCEs** in PHP core (CWE-416, use-af
 
 ## `fix` — ini mitigation (partial)
 
-`fix` writes `session.upload_progress.enabled = 0` and `fatal_error_backtraces = 0`. These are cheap (almost no app uses them, uploads keep working), and they are listed in the CVE-2026-109619 advisory as partial mitigations — they remove two confirmed paths for that bug. **They do nothing for CVE-2026-109618 (OOM), which needs neither feature.** So `fix` alone is not enough; use `block` for broader coverage and patch as soon as you can.
+`fix` writes `session.upload_progress.enabled = 0` and `fatal_error_backtraces = 0`. These are cheap (almost no app uses them, uploads keep working), and they are listed in the CVE-2026-109619 advisory as partial mitigations — they remove two confirmed paths for that bug. **They do nothing for CVE-2026-109618 (OOM), which needs neither feature.** So `fix` alone is not enough; for 109618 use `block` (entry vector) or `harden` (the advisory's ini mitigation), and patch as soon as you can.
 
 ```sh
 sudo sh php2shell.sh fix      # apply
@@ -77,6 +79,23 @@ sudo sh php2shell.sh unblock   # revert
 - **Apache** (Debian and RHEL families): the rule is written to the server's include dir, validated and reloaded automatically. It matches any `Content-Type` starting with `multipart/`, so it isn't fooled by the `;` vs `,` boundary trick.
 - **Allowlist** paths match at a path boundary: `/wp-admin` allows `/wp-admin` and `/wp-admin/...`, but not `/wp-admin-anything`.
 - **nginx**: the block isn't applied automatically (nginx can't do it globally and safely). The command prints a snippet to paste into each `server {}` block.
+
+## `harden` — ini mitigation for CVE-2026-109618 (opt-in, higher risk)
+
+The OOM advisory (GHSA-w8hw-w9fx-j79w) says to set `memory_limit=-1` so applications can't override it (via `php_admin_value` in the FPM pool / Apache config), plus a low `post_max_size`. `harden` does exactly that, writing one `php_admin_value` drop-in per FPM pool and for Apache mod_php, validating the config and rolling back automatically if php-fpm would refuse it.
+
+```sh
+sudo sh php2shell.sh harden                              # memory_limit=-1, post_max_size=8M
+sudo PHP2SHELL_POST_MAX_SIZE=32M sh php2shell.sh harden   # if you need bigger uploads
+sudo sh php2shell.sh unharden                            # revert
+```
+
+Read this before running it:
+
+- It is **partial** — the advisory says an underlying allocation failure can still reach the vulnerable path. It does not replace the patch.
+- `memory_limit=-1` means **one request can exhaust all RAM**. You **must** have a container/cgroup memory cap as a boundary first, or this becomes a DoS. `harden` warns if it can't see one. Do **not** use `RLIMIT_AS`/`RLIMIT_DATA` for the cap — the advisory says they reintroduce the bug.
+- `post_max_size` (default `8M`) **breaks larger uploads**. Use `PHP2SHELL_POST_MAX_SIZE=32M` if you need them.
+- This is why it's separate from `fix` and off by default. If you can, prefer `block` (cuts the entry vector with no DoS risk) or just patch.
 
 ## Docker and Kubernetes
 
@@ -131,7 +150,7 @@ On Ubuntu the version doesn't change with the patch (it stays `8.3.6`), so the s
 
 Tested on Laravel 13 (`php:8.4-fpm` + nginx), WordPress (`wordpress:php8.3-apache`), Debian 13 with php-fpm, Ubuntu 24.04 with Apache + mod_php, Rocky 9 with httpd + php-fpm, Alpine (`php:8.3-fpm-alpine`) and Debian with systemd. `check` was also validated against a PHP 8.4.27 build from source (reports `CORRIGIDO`).
 
-The test doesn't trust `ini_get()`. For `fix`, it sends a multipart POST with `PHP_SESSION_UPLOAD_PROGRESS` and checks whether PHP wrote the session file to disk — which happens before any application code, even on Laravel. For `block`, it confirms a multipart POST gets a 403, an allowlisted path still accepts uploads, and the rest of the site keeps working. This verifies the mitigations are applied and the patch verdict is correct — it is not an exploit. Don't run the "PoCs" circulating on X and random sites; many carry malware.
+The test doesn't trust `ini_get()`. For `fix`, it sends a multipart POST with `PHP_SESSION_UPLOAD_PROGRESS` and checks whether PHP wrote the session file to disk — which happens before any application code, even on Laravel. For `block`, it confirms a multipart POST gets a 403, an allowlisted path still accepts uploads, and the rest of the site keeps working. For `harden`, it reads the effective `memory_limit` over FastCGI and checks it goes to `-1` and back. This verifies the mitigations are applied and the patch verdict is correct — it is not an exploit. Don't run the "PoCs" circulating on X and random sites; many carry malware.
 
 ```sh
 tests/lab.sh up && tests/lab.sh test && tests/lab.sh down

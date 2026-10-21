@@ -172,6 +172,26 @@ test_block() {
 	expect "POST multipart não é mais 403 após unblock" "$([ "$code" = 403 ] && echo BLOQ || echo ok)" ok
 }
 
+# valor efetivo de memory_limit via FastCGI (só ambientes php-fpm)
+effmem() { # ctr socket
+	docker exec "$1" sh -c 'command -v cgi-fcgi >/dev/null || exit 2
+		echo "<?php echo ini_get(\"memory_limit\");" > /tmp/m.php
+		SCRIPT_FILENAME=/tmp/m.php REQUEST_METHOD=GET cgi-fcgi -bind -connect '"$2"' 2>/dev/null | tail -1'
+}
+
+test_harden() { # ambiente socket
+	local e="$1" sock="$2" c
+	c=$(php_ctr "$e")
+	docker exec "$c" sh -c 'command -v cgi-fcgi >/dev/null || (apk add --no-cache fcgi >/dev/null 2>&1 || (apt-get install -y -qq libfcgi-bin >/dev/null 2>&1))'
+	[ "$(effmem "$c" "$sock")" = "-1" ] && return   # cgi-fcgi indisponível: pula silencioso
+	printf '  -- harden (OOM 109618) --\n'
+	expect "memory_limit antes do harden"   "$(effmem "$c" "$sock")" 128M
+	"$ROOT/php2shell.sh" docker harden "$c" > "$LAB/out-$e-harden.txt" 2>&1
+	expect "memory_limit = -1 após harden"   "$(effmem "$c" "$sock")" -1
+	"$ROOT/php2shell.sh" docker unharden "$c" > "$LAB/out-$e-unharden.txt" 2>&1
+	expect "memory_limit volta após unharden" "$(effmem "$c" "$sock")" 128M
+}
+
 test_all() {
 	head -c 65536 /dev/zero > "$PAYLOAD"
 	for e in $ENVS; do
@@ -191,6 +211,7 @@ test_all() {
 			docker exec lab-debian php-fpm8.4 -D
 		fi
 		case $e in ubuntu | wordpress) test_block "$e" ;; esac
+		[ "$e" = debian ] && test_harden debian /run/php/php8.4-fpm.sock
 	done
 	printf '\n%s ok, %s falhas (saídas completas em %s/out-*.txt)\n' "$PASS" "$FAIL" "$LAB"
 	[ "$FAIL" = 0 ]

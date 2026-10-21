@@ -6,10 +6,13 @@
 #   sudo ./php2shell.sh undo                     desfaz o fix
 #   sudo ./php2shell.sh block                    (opção) bloqueia POST multipart no Apache/nginx (corta mais, mas quebra upload)
 #   sudo ./php2shell.sh unblock                  desfaz o block
-#   sudo ./php2shell.sh docker check|fix|undo|block|unblock [container...]
+#   sudo ./php2shell.sh harden                   (opção, 109618/OOM) memory_limit=-1 + post_max_size via php_admin_value
+#   sudo ./php2shell.sh unharden                 desfaz o harden
+#   sudo ./php2shell.sh docker check|fix|undo|block|unblock|harden|unharden [container...]
 #                                                roda o comando dentro dos containers em execução (docker/podman)
 #
 # PHP2SHELL_UPLOAD_PATHS="/upload /wp-admin"     no block, caminhos que continuam aceitando upload (allowlist)
+# PHP2SHELL_POST_MAX_SIZE="32M"                  no harden, post_max_size (padrão 8M; use 32M se precisa de upload)
 #
 # Código de saída: 0 = corrigido | 1 = vulnerável, mas parado ou sem exposição em rede
 #                  2 = vulnerável com mitigação | 3 = vulnerável e exposto | 4 = erro
@@ -19,7 +22,7 @@
 
 set -u
 
-SCRIPT_VERSION=2026.10.21-5
+SCRIPT_VERSION=2026.10.21-6
 CVES="CVE-2026-109618 CVE-2026-109619"
 # Versões com a correção, por branch. Confirmadas no advisory (release saiu 21/10/2026 13:36 UTC).
 # Para sobrescrever sem editar o script: PHP2SHELL_FIXED="8.2.35 8.3.36 8.4.27 8.5.12" ./php2shell.sh check
@@ -28,6 +31,8 @@ FIXED_CONFIRMED=1
 RELEASE_UTC=202610211336
 INI_NAME=zz-php2shell.ini
 BLOCK_NAME=php2shell-block.conf
+HARDEN_NAME=zz-php2shell-harden.conf
+POST_MAX=${PHP2SHELL_POST_MAX_SIZE:-8M}
 TAG=php2shell.sh
 
 if [ -t 1 ]; then
@@ -635,13 +640,118 @@ do_unblock() {
 	command -v nginx >/dev/null 2>&1 && warn "se você colou o trecho no nginx, remova-o à mão e rode: nginx -t && nginx -s reload"
 }
 
+# ---------- harden/unharden: mitigação da 109618 (OOM) — opt-in, mais invasiva ----------
+# Segue o advisory GHSA-w8hw-w9fx-j79w: memory_limit=-1 via php_admin_value (app não sobrescreve)
+# + post_max_size baixo. NÃO fecha a 109618, e memory_limit=-1 exige um teto de container/cgroup
+# como fronteira de disponibilidade. Por isso é separado do fix e cheio de aviso.
+
+fpm_pool_dirs() {
+	local d
+	for d in /etc/php/*/fpm/pool.d /etc/php-fpm.d /usr/local/etc/php-fpm.d \
+		/opt/remi/php*/root/etc/php-fpm.d /opt/cpanel/ea-php*/root/etc/php-fpm.d \
+		/opt/plesk/php/*/etc/php-fpm.d; do
+		[ -d "$d" ] && echo "$d"
+	done | sort -u
+}
+
+fpm_bins() { list_bins | grep '/php-fpm'; }
+
+# nomes de pool definidos num dir (ignora [global] e o nosso próprio arquivo)
+pools_in() {
+	grep -hE '^\s*\[.+\]' "$1"/*.conf 2>/dev/null | grep -v "$HARDEN_NAME" |
+		sed 's/^\s*\[//; s/\].*//' | grep -v '^global$' | sort -u
+}
+
+harden_fpm_conf() { # dir -> seção php_admin_value por pool
+	local p
+	printf '; %s - mitigação OOM (CVE-2026-109618) - %s\n' "$TAG" "$(date '+%Y-%m-%d %H:%M %Z')"
+	printf '; PARCIAL: nao fecha a 109618. memory_limit=-1 exige teto de cgroup/container. Remover: php2shell.sh unharden\n'
+	for p in $(pools_in "$1"); do
+		printf '[%s]\nphp_admin_value[memory_limit] = -1\nphp_admin_value[post_max_size] = %s\n' "$p" "$POST_MAX"
+	done
+}
+
+harden_apache_conf() {
+	cat <<EOF
+# $TAG - mitigação OOM (CVE-2026-109618) - $(date '+%Y-%m-%d %H:%M %Z')
+# PARCIAL: memory_limit=-1 exige teto de cgroup/container. Remover: php2shell.sh unharden
+<IfModule mod_php.c>
+    php_admin_value memory_limit -1
+    php_admin_value post_max_size $POST_MAX
+</IfModule>
+EOF
+}
+
+# aviso sobre o teto de memória do SO (sem ele, memory_limit=-1 vira risco de DoS)
+cgroup_mem_warn() {
+	local m
+	if [ -r /sys/fs/cgroup/memory.max ]; then
+		m=$(cat /sys/fs/cgroup/memory.max 2>/dev/null)
+		[ "$m" = max ] && warn "memory.max = max: SEM teto de memória. Defina um limite no container/cgroup antes, ou memory_limit=-1 vira risco de DoS."
+	elif [ -r /sys/fs/cgroup/memory/memory.limit_in_bytes ]; then
+		m=$(cat /sys/fs/cgroup/memory/memory.limit_in_bytes 2>/dev/null)
+		case $m in 9223372036854771712 | 92233720368547758*) warn "cgroup sem limite de memória: defina um teto antes, ou memory_limit=-1 vira risco de DoS." ;; esac
+	else
+		warn "não vi um teto de memória de cgroup aqui: garanta um limite no container/host, senão memory_limit=-1 permite esgotar a RAM."
+	fi
+}
+
+# valida a config de todos os php-fpm; em erro, remove os arquivos de harden e aborta
+fpm_validate_or_rollback() {
+	local b out bad=0 d
+	for b in $(fpm_bins); do
+		out=$("$b" -t 2>&1) || { bad=1; bad "config do php-fpm inválida após harden ($b):"; printf '%s\n' "$out" | tail -3; }
+	done
+	[ "$bad" = 0 ] && return 0
+	for d in $(fpm_pool_dirs); do rm -f "$d/$HARDEN_NAME"; done
+	die "revertido o harden do FPM (nada aplicado). Corrija e tente de novo."
+}
+
+do_harden() {
+	local d f wrote=0 ctl
+	need_root harden
+	printf '%sHarden OOM (CVE-2026-109618): memory_limit=-1 + post_max_size=%s via php_admin_value%s\n' "$B" "$POST_MAX" "$N"
+	warn "MITIGAÇÃO PARCIAL: não fecha a 109618 e NÃO substitui o patch."
+	warn "memory_limit=-1 = memória ilimitada por request. SEM teto de cgroup/container isso é risco de DoS."
+	warn "post_max_size=$POST_MAX quebra uploads maiores. Ajuste com: PHP2SHELL_POST_MAX_SIZE=32M $0 harden"
+	warn "NÃO use RLIMIT_AS/RLIMIT_DATA como teto: o advisory diz que reintroduzem a falha."
+	cgroup_mem_warn
+	for d in $(fpm_pool_dirs); do
+		[ -n "$(pools_in "$d")" ] || continue
+		f="$d/$HARDEN_NAME"
+		if harden_fpm_conf "$d" > "$f"; then ok "criado $f (pools: $(pools_in "$d" | tr '\n' ' '))"; wrote=1; else bad "falhou ao escrever $f"; fi
+	done
+	[ "$wrote" = 1 ] && fpm_validate_or_rollback
+	d=$(apache_conf_dir)
+	if [ -n "$d" ] && { apache_running || [ -n "$(modphp_libs)" ]; } && [ -n "$(apache_modphp)$(modphp_libs)" ]; then
+		f="$d/$HARDEN_NAME"
+		harden_apache_conf > "$f"
+		if ctl=$(apache_ctl) && "$ctl" -t >/dev/null 2>&1; then ok "criado $f"; wrote=1
+		else rm -f "$f"; warn "Apache rejeitou php_admin_value (mod_php não carregado aqui?): pulei o Apache"; fi
+	fi
+	[ "$wrote" = 1 ] || { warn "nenhum pool de FPM nem mod_php para endurecer aqui"; return 0; }
+	reload_all
+}
+
+do_unharden() {
+	local d f n=0
+	need_root unharden
+	printf '%sRemovendo o harden OOM%s\n' "$B" "$N"
+	for d in $(fpm_pool_dirs) /etc/apache2/conf-enabled /etc/httpd/conf.d /usr/local/apache2/conf/extra; do
+		f="$d/$HARDEN_NAME"
+		[ -f "$f" ] && rm -f "$f" && ok "removido $f" && n=$((n + 1))
+	done
+	[ "$n" = 0 ] && { echo "  nada para remover"; return 0; }
+	reload_all
+}
+
 # ---------- containers ----------
 
 do_docker() {
 	local action="${1:-check}" rt list c rc worst=0 n=0
 	[ $# -gt 0 ] && shift
 	list=$*
-	case $action in check | fix | undo | block | unblock) ;; *) die "uso: $0 docker check|fix|undo|block|unblock [container...]" ;; esac
+	case $action in check | fix | undo | block | unblock | harden | unharden) ;; *) die "uso: $0 docker check|fix|undo|block|unblock|harden|unharden [container...]" ;; esac
 	rt=$(command -v docker 2>/dev/null || command -v podman 2>/dev/null) || die "docker/podman não encontrado"
 	[ -f "$0" ] || die "no modo docker rode a partir do arquivo (não via pipe)"
 	[ -n "$list" ] || list=$("$rt" ps --format '{{.Names}}')
@@ -653,6 +763,7 @@ do_docker() {
 		set -- -u 0 -i
 		[ -n "${PHP2SHELL_FIXED:-}" ] && set -- "$@" -e "PHP2SHELL_FIXED=$PHP2SHELL_FIXED"
 		[ -n "${PHP2SHELL_UPLOAD_PATHS:-}" ] && set -- "$@" -e "PHP2SHELL_UPLOAD_PATHS=$PHP2SHELL_UPLOAD_PATHS"
+		[ -n "${PHP2SHELL_POST_MAX_SIZE:-}" ] && set -- "$@" -e "PHP2SHELL_POST_MAX_SIZE=$PHP2SHELL_POST_MAX_SIZE"
 		"$rt" exec "$@" "$c" sh -s -- "$action" < "$0"; rc=$?
 		[ "$rc" -gt "$worst" ] && worst=$rc
 	done
@@ -668,6 +779,8 @@ fix) do_fix ;;
 undo) do_undo ;;
 block) do_block ;;
 unblock) do_unblock ;;
+harden) do_harden ;;
+unharden) do_unharden ;;
 docker) shift; do_docker "$@" ;;
 -h | --help | help) usage ;;
 *) usage; exit 4 ;;
