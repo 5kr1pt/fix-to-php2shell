@@ -180,6 +180,8 @@ The original researcher (Calif) also recommends `memory_limit=-1` as a mitigatio
 <img width="732" height="592" alt="image" src="https://github.com/user-attachments/assets/057883fc-6862-42fb-9811-1d960adecf6e" />
 
 - 13:36 UTC, 21 Oct: PHP released 8.2.35 / 8.3.36 / 8.4.27 / 8.5.12 (earlier than the scheduled 14:00, due to active exploitation). 8.1 and older are EOL — no PHP patch, only distro backports.
+- 14:35 UTC, 21 Oct: exploitation confirmed in the wild **at scale**. watchTowr's Attacker Eye honeypot network observed exploitation of both CVEs, and Hadrian reports attacks "at scale" — mostly through the `session.upload_progress` path (the vector `fix` disables). Earlier the same morning Huntress and watchTowr had seen none; it flipped within hours. Not yet in CISA KEV at time of writing.
+- 21 Oct: PortSwigger shipped PHP2Shell detection for Burp Suite Professional & DAST — ActiveScan++ v2.0.13, Bambda scan checks, and BChecks (CVE-2026-109618 / 109619).
 
 ## Links
 
