@@ -134,7 +134,6 @@ Worth looking for signs of compromise since the 20th: php-fpm or apache spawning
 <img width="732" height="592" alt="image" src="https://github.com/user-attachments/assets/057883fc-6862-42fb-9811-1d960adecf6e" />
 
 ## Links
-https://www.php.net/
 - https://www.php.net/
 - https://sansec.io/research/php2shell
 - https://www.huntress.com/blog/php2shell-leaked-critical-php-vulnerabilities
