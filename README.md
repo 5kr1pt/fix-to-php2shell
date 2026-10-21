@@ -172,6 +172,7 @@ The original researcher (Calif) also recommends `memory_limit=-1` as a mitigatio
 
 ## Timeline
 
+- **Credit:** the PHP advisories list the reporters as `lcfr-hax`, `sagitzadik-wiz`, `tomash-areion` and `amyb-oai` — i.e. [@lcfr_hax](https://twitter.com/lcfr_hax) (lead, writeup published via [Calif.io](https://calif.io/php2shell/)), Wiz, OpenAI and Areion, with independent discovery across teams. The lead researcher used an LLM as an "audit buddy" for source review but noted "no model is simply capable of unearthing all bugs with simple prompts" — human-led, AI-assisted, not AI-found.
 - Two unauthenticated RCEs in PHP core, CVSS v4.0 9.2 each. Details leaked on 20 Oct, before the embargo ended.
 - Cloudflare and Patchstack reported attacks from the morning of the 21st.
 - 08:20 (local): Cloudflare says they're already seeing early attacks against the two leaked bugs. WAF rules are live for all plans, including free, but they call it a stopgap.
