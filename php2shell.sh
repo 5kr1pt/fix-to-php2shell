@@ -19,7 +19,7 @@
 
 set -u
 
-SCRIPT_VERSION=2026.10.21-2
+SCRIPT_VERSION=2026.10.21-3
 CVES="CVE-2026-109618 CVE-2026-109619"
 # Versões com a correção, por branch. Até o advisory oficial (21/10/2026 14:00 UTC) são as ESPERADAS.
 # Para sobrescrever sem editar o script: PHP2SHELL_FIXED="8.2.35 8.3.36 8.4.27 8.5.12" ./php2shell.sh check
