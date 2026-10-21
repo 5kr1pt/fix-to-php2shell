@@ -2,93 +2,68 @@
 
 CVE-2026-109618 and CVE-2026-109619
 
-A script to check whether a server's PHP is exposed to PHP2Shell and to apply the temporary mitigation (turning off `session.upload_progress`) until the patch is out.
+A script to check whether a server's PHP is exposed to PHP2Shell, apply the temporary mitigations, and confirm the patch once it's installed.
 
-This does not fix the bug. One of the PHP 8.6 release managers already said on r/PHP that the ini change alone won't protect you and that you need to update PHP:
-
-<img src="img/release-manager-reddit.png" alt="PHP 8.6 release manager on r/PHP: INI files alone won't protect you. You need to update PHP." width="600" />
-
-Thread: https://www.reddit.com/r/PHP/comments/1xb2utu/upcoming_critical_php_security_release/
-
-So the ini change is only there to shrink the attack surface until the patch lands. After that, use the script to confirm the server was actually updated.
-
-The patch is due today, October 21, at 14:00 UTC:
-
-<img width="1329" height="597" alt="image" src="https://github.com/user-attachments/assets/2e7b2b83-9bbb-4515-a393-32abe2322c72" />
-
-<details>
-<summary>Announcement text</summary>
-
-> Upcoming Critical PHP Security Release
->
-> The PHP security team would like to give advance notice of an upcoming security release.
->
-> It is scheduled for Wednesday, 21 October 2026 at 14:00 UTC.
->
-> It addresses two critical vulnerabilities, both rated CVSS v4.0 9.2.
->
-> All PHP users are encouraged to prepare now so they can upgrade as soon as the release is available.
->
-> We reserve the right to release earlier should details of either vulnerability become public, or should evidence of active exploitation appear in the wild.
->
-> Full details, affected versions, and the fixed versions will be published with the release.
->
-> Thank you for helping us keep PHP secure.
-
-</details>
-
-Source: https://news-web.php.net/php.announce/509
-
-## Usage
+## Quick start
 
 ```sh
 curl -fsSLO https://raw.githubusercontent.com/5kr1pt/fix-to-php2shell/main/php2shell.sh
-sh php2shell.sh check
-sudo sh php2shell.sh fix
+
+sh php2shell.sh check        # diagnosis only, changes nothing
+sudo sh php2shell.sh fix     # mitigation: turn off session.upload_progress and reload
 ```
 
-Once the patch is out, update PHP (`check` prints the right command for your distro) and run `check` again. It should end with `RESULTADO: CORRIGIDO`.
+After the patch is out, update PHP (`check` prints the exact command for your distro) and run `check` again. It should end with `RESULTADO: CORRIGIDO`.
 
-The script output is in Portuguese. The last line is always `RESULTADO: ...`, with one of these values:
+## Commands
 
-- `CORRIGIDO`: patched;
-- `VULNERAVEL_SEM_EXPOSICAO`: vulnerable, but stopped or only reachable from localhost;
-- `VULNERAVEL_MITIGADO`: vulnerable and reachable over the network, mitigation applied;
-- `VULNERAVEL_EXPOSTO`: vulnerable, reachable over the network, no mitigation;
-- `SEM_PHP_WEB`: no PHP serving web traffic.
+| Command | What it does | Root? |
+|---|---|---|
+| `check` | Lists every PHP serving web traffic (php-fpm, mod_php, `php -S`) with version, patch status, mitigation status, and whether it's running and reachable on the network. **Changes nothing.** | no |
+| `fix` | Writes `session.upload_progress.enabled = 0` to every PHP `conf.d`, tests the config and reloads php-fpm and Apache. | yes |
+| `undo` | Removes what `fix` created and reloads. | yes |
+| `block` | **Optional, stronger.** Blocks multipart POST requests at Apache/nginx. Cuts more of the attack surface but **breaks file uploads** unless you allowlist paths. | yes |
+| `unblock` | Removes the multipart block. | yes |
+| `docker <cmd> [container...]` | Runs any of the above inside running containers (docker or podman). No names = every running container with PHP. | — |
 
-Commands:
+Exit codes, from lowest to highest risk: `0` patched · `1` vulnerable but stopped or localhost only · `2` vulnerable, mitigated · `3` vulnerable and exposed · `4` error. The last line is always `RESULTADO: <status>`.
 
-- `check`: lists every PHP that serves web traffic (php-fpm, mod_php, `php -S`), with its version, whether it's patched, whether the mitigation is active, and whether it's running and listening on the network. Changes nothing.
-- `fix`: writes `zz-php2shell.ini` to every PHP `conf.d`, tests the config and reloads php-fpm and Apache.
-- `undo`: removes what `fix` created and reloads.
-- `docker check|fix|undo [container...]`: runs inside containers (docker or podman). With no names it goes through every running container that has PHP.
+> **Important:** none of these commands *fix* the bug. One of the PHP 8.6 release managers said on r/PHP that the ini change alone won't protect you and that you need to update PHP. The mitigations only shrink the attack surface until you can patch.
+>
+> <img src="img/release-manager-reddit.png" alt="PHP 8.6 release manager on r/PHP: INI files alone won't protect you. You need to update PHP." width="520" />
+>
+> Thread: https://www.reddit.com/r/PHP/comments/1xb2utu/upcoming_critical_php_security_release/
 
-Exit codes, from lowest to highest risk:
+## `fix` — disable session.upload_progress
 
-- 0: patched;
-- 1: vulnerable, but stopped or localhost only;
-- 2: vulnerable, mitigated;
-- 3: vulnerable and exposed;
-- 4: error.
+This is the low-risk mitigation. It turns off `session.upload_progress`, a feature almost no application uses, so uploads and forms keep working. It targets the path every public analysis (including the leaked write-up) points to, which needs that feature on. It does **not** cover a possible second path through the multipart parser.
 
-Since the ini change isn't a fix, a stopped service or one that only listens on localhost counts as lower risk than a mitigated one.
+```sh
+sudo sh php2shell.sh fix      # apply
+sudo sh php2shell.sh undo     # revert
+```
 
-The network check only sees the host itself. If you removed external access at the proxy, firewall or DNS, the script can't tell. The internal network can still reach the service, so it stays `EXPOSTO`. That's on purpose.
+## `block` — reject multipart POSTs (optional, stronger)
 
-Works on Debian/Ubuntu, RHEL/Rocky/Alma, Alpine, the official `php:*` images, Remi, cPanel, Plesk and CloudLinux.
+If a system can't be patched or taken offline yet, you can block `multipart/form-data` POSTs at the web server. This also covers the multipart-parser path, but **it breaks every upload** unless you allowlist the paths that need them.
 
-On Ubuntu the version doesn't change with the patch (it stays `8.3.6`), so the script looks for the CVE IDs in the package changelog. It also warns when:
+```sh
+# block everything (no uploads anywhere):
+sudo sh php2shell.sh block
 
-- a pool forces `upload_progress = On`;
-- the process is still running the old binary after an upgrade;
-- the service is stopped but enabled at boot;
-- php-fpm accepts FastCGI straight from the network (e.g. `0.0.0.0:9000`);
-- the version is 8.1 or older, which won't get a PHP patch.
+# keep uploads working on specific paths:
+sudo PHP2SHELL_UPLOAD_PATHS="/wp-admin /api/upload" sh php2shell.sh block
+
+sudo sh php2shell.sh unblock   # revert
+```
+
+- **Apache** (Debian and RHEL families): the rule is written to the server's include dir, validated and reloaded automatically. It matches any `Content-Type` starting with `multipart/`, so it isn't fooled by the `;` vs `,` boundary trick.
+- **Allowlist** paths match at a path boundary: `/wp-admin` allows `/wp-admin` and `/wp-admin/...`, but not `/wp-admin-anything`.
+- **nginx**: the block isn't applied automatically (nginx can't do it globally and safely). The command prints a snippet to paste into each `server {}` block.
 
 ## Docker and Kubernetes
 
-`docker fix` is gone as soon as the container is recreated. To make it stick, add this to the Dockerfile:
+`docker fix`/`docker block` are gone as soon as a container is recreated. To make `fix` stick, add this to the Dockerfile:
 
 ```dockerfile
 RUN echo 'session.upload_progress.enabled = 0' > "$PHP_INI_DIR/conf.d/zz-php2shell.ini"
@@ -120,25 +95,25 @@ volumes:
 
 Then run `kubectl rollout restart deploy/<app>`. For the patch itself, update the base image and rebuild.
 
+## Coverage
+
+Works on Debian/Ubuntu, RHEL/Rocky/Alma, Alpine, the official `php:*` images, Remi, cPanel, Plesk and CloudLinux.
+
+On Ubuntu the version doesn't change with the patch (it stays `8.3.6`), so the script looks for the CVE IDs in the package changelog. The network check only sees the host itself — if you removed external access at the proxy, firewall or DNS, the script can't tell, so it keeps the service as `EXPOSTO`. That's on purpose.
+
+`check` also warns when:
+
+- a pool forces `upload_progress = On`;
+- the process is still running the old binary after an upgrade;
+- the service is stopped but enabled at boot;
+- php-fpm accepts FastCGI straight from the network (e.g. `0.0.0.0:9000`);
+- the version is 8.1 or older, which won't get a PHP patch.
+
 ## Tests
 
-Tested on:
+Tested on Laravel 13 (`php:8.4-fpm` + nginx), WordPress (`wordpress:php8.3-apache`), Debian 13 with php-fpm, Ubuntu 24.04 with Apache + mod_php, Rocky 9 with httpd + php-fpm, Alpine (`php:8.3-fpm-alpine`) and Debian with systemd.
 
-- Laravel 13 (`php:8.4-fpm` + nginx)
-- WordPress (`wordpress:php8.3-apache`)
-- Debian 13 with php-fpm
-- Ubuntu 24.04 with Apache + mod_php
-- Rocky 9 with httpd + php-fpm
-- Alpine (`php:8.3-fpm-alpine`)
-- Debian with systemd
-
-On all of them the feature was on before and turned off after `fix`. The app and file uploads kept working, and `undo` turned the feature back on.
-
-The network check was tested with nginx on `0.0.0.0` and on `127.0.0.1`, php-fpm stopped (enabled and disabled at boot) and php-fpm listening on `0.0.0.0:9000`.
-
-The test doesn't trust `ini_get()`. It sends a multipart POST with `PHP_SESSION_UPLOAD_PROGRESS` and checks whether PHP wrote the session file to disk. That happens before any application code runs, even on Laravel, which doesn't use native PHP sessions at all.
-
-This shows the mitigation was applied, not that it stops the exploit. There's no reliable public PoC yet.
+The test doesn't trust `ini_get()`. For `fix`, it sends a multipart POST with `PHP_SESSION_UPLOAD_PROGRESS` and checks whether PHP wrote the session file to disk — which happens before any application code, even on Laravel. For `block`, it confirms a multipart POST gets a 403, an allowlisted path still accepts uploads, and the rest of the site keeps working. This shows the mitigations are applied, not that they stop the exploit. There's no reliable public PoC.
 
 ```sh
 tests/lab.sh up && tests/lab.sh test && tests/lab.sh down
@@ -151,14 +126,9 @@ tests/lab.sh up && tests/lab.sh test && tests/lab.sh down
 - Cloudflare and Patchstack report attacks since the morning of the 21st.
 - Expected fixed versions: 8.2.35, 8.3.36, 8.4.27 and 8.5.12. I'll update this once the advisory is out. 8.1 and older won't get a PHP patch, only distro backports.
 
-If you can't update right away, take the service off the internet (VPN, allowlist). A WAF only helps if the origin accepts traffic from the WAF alone.
+If you can't update right away, take the service off the internet (VPN, allowlist). A WAF only helps if the origin accepts traffic from the WAF alone. And don't download or run the "PoCs" circulating on X and random sites — many carry malware.
 
-Worth looking for signs of compromise since the 20th:
-
-- php-fpm or apache spawning `sh`, `curl`, `wget` or `nc`;
-- new `.php` files in the webroot;
-- new cron jobs or users;
-- `SIGSEGV` in the php-fpm log.
+Worth looking for signs of compromise since the 20th: php-fpm or apache spawning `sh`, `curl`, `wget` or `nc`; new `.php` files in the webroot; new cron jobs or users; `SIGSEGV` in the php-fpm log.
 
 ## Links
 

@@ -154,6 +154,24 @@ expect() { # descrição obtido esperado
 	else FAIL=$((FAIL + 1)); printf '    FALHA %-38s obtido=%s esperado=%s\n' "$1" "$2" "$3"; fi
 }
 
+mp_post() { # ambiente caminho -> http_code de um POST multipart
+	curl -s -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: multipart/form-data, boundary=x' --data 'a=b' "http://127.0.0.1:$(port "$1")$2"
+}
+
+test_block() {
+	local e="$1" up code
+	up=$(upload_path "$e")
+	printf '  -- block (multipart) --\n'
+	expect "GET / antes do block"            "$(app_code "$e" | sed 's/^302$/200/')" 200
+	PHP2SHELL_UPLOAD_PATHS="$up" "$ROOT/php2shell.sh" docker block "$(php_ctr "$e")" > "$LAB/out-$e-block.txt" 2>&1
+	expect "POST multipart fora da allowlist" "$(mp_post "$e" /nao-existe.php)" 403
+	expect "upload na rota liberada"          "$(upload_ok "$e" && echo 200 || echo bloq)" 200
+	expect "GET / segue respondendo"          "$(app_code "$e" | sed 's/^302$/200/')" 200
+	"$ROOT/php2shell.sh" docker unblock "$(php_ctr "$e")" > "$LAB/out-$e-unblock.txt" 2>&1
+	code=$(mp_post "$e" /nao-existe.php)
+	expect "POST multipart não é mais 403 após unblock" "$([ "$code" = 403 ] && echo BLOQ || echo ok)" ok
+}
+
 test_all() {
 	head -c 65536 /dev/zero > "$PAYLOAD"
 	for e in $ENVS; do
@@ -172,6 +190,7 @@ test_all() {
 			expect "check com php-fpm parado (exit)" "$(script check "$e")" 1
 			docker exec lab-debian php-fpm8.4 -D
 		fi
+		case $e in ubuntu | wordpress) test_block "$e" ;; esac
 	done
 	printf '\n%s ok, %s falhas (saídas completas em %s/out-*.txt)\n' "$PASS" "$FAIL" "$LAB"
 	[ "$FAIL" = 0 ]

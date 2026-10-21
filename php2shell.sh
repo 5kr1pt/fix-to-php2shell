@@ -4,8 +4,12 @@
 #        ./php2shell.sh check                    diz se o PHP desta máquina está vulnerável e/ou mitigado (não altera nada)
 #   sudo ./php2shell.sh fix                      desliga session.upload_progress e recarrega PHP-FPM / Apache
 #   sudo ./php2shell.sh undo                     desfaz o fix
-#   sudo ./php2shell.sh docker check|fix|undo [container...]
+#   sudo ./php2shell.sh block                    (opção) bloqueia POST multipart no Apache/nginx (corta mais, mas quebra upload)
+#   sudo ./php2shell.sh unblock                  desfaz o block
+#   sudo ./php2shell.sh docker check|fix|undo|block|unblock [container...]
 #                                                roda o comando dentro dos containers em execução (docker/podman)
+#
+# PHP2SHELL_UPLOAD_PATHS="/upload /wp-admin"     no block, caminhos que continuam aceitando upload (allowlist)
 #
 # Código de saída: 0 = corrigido | 1 = vulnerável, mas parado ou sem exposição em rede
 #                  2 = vulnerável com mitigação | 3 = vulnerável e exposto | 4 = erro
@@ -23,6 +27,7 @@ FIXED=${PHP2SHELL_FIXED:-"8.2.35 8.3.36 8.4.27 8.5.12"}
 FIXED_CONFIRMED=0
 RELEASE_UTC=202610211400
 INI_NAME=zz-php2shell.ini
+BLOCK_NAME=php2shell-block.conf
 TAG=php2shell.sh
 
 if [ -t 1 ]; then
@@ -510,25 +515,127 @@ do_undo() {
 	reload_all
 }
 
+# ---------- block/unblock multipart (opcional) ----------
+
+apache_ctl() { command -v apache2ctl || command -v apachectl || command -v httpd; }
+
+# diretório de include do Apache onde largar o nosso .conf (Debian vs RHEL)
+apache_conf_dir() {
+	local d
+	for d in /etc/apache2/conf-enabled /etc/httpd/conf.d /usr/local/apache2/conf/extra; do
+		[ -d "$d" ] && { echo "$d"; return; }
+	done
+}
+
+reload_apache() {
+	local pid unit ctl
+	pid=$(procs | awk -F'|' '$3 == "apache2" || $3 == "httpd" { print $1; exit }')
+	unit=""; [ -n "$pid" ] && unit=$(service_unit "$pid")
+	ctl=$(apache_ctl) || { warn "apachectl não encontrado: recarregue o Apache manualmente"; return 1; }
+	"$ctl" -t >/dev/null 2>&1 || { bad "config do Apache inválida, NÃO recarreguei. Rode: $ctl -t"; return 1; }
+	if [ -n "$unit" ] && command -v systemctl >/dev/null 2>&1; then
+		if systemctl reload "$unit"; then ok "Apache recarregado ($unit)"; else bad "falhou: systemctl reload $unit"; fi
+	elif "$ctl" -k graceful 2>/dev/null; then
+		ok "Apache recarregado (graceful)"
+	elif [ -z "$pid" ]; then
+		ok "regra gravada (Apache não está rodando agora; entra no próximo start)"
+	else
+		warn "não consegui recarregar o Apache: faça manualmente"
+	fi
+}
+
+# bloco <If> que recusa POST multipart, com allowlist opcional em PHP2SHELL_UPLOAD_PATHS.
+# Casa qualquer Content-Type que começa com "multipart/" (pega as variantes ;  ,  e maiúsculas).
+apache_block_conf() {
+	local expr p allow=""
+	expr='%{REQUEST_METHOD} == '"'"'POST'"'"' && %{HTTP:Content-Type} =~ m#^\s*multipart/#i'
+	# allowlist: casa o caminho na fronteira de segmento (^/wp-admin pega /wp-admin e /wp-admin/... mas NÃO /wp-admin-evil)
+	for p in ${PHP2SHELL_UPLOAD_PATHS:-}; do
+		p=${p%/}; [ -n "$p" ] || p=/
+		pe=$(printf '%s' "$p" | sed 's/[.\\]/\\&/g')
+		allow="$allow${allow:+ || }%{REQUEST_URI} =~ m#^$pe(\$|/)#"
+	done
+	[ -n "$allow" ] && expr="$expr && ! ( $allow )"
+	cat <<EOF
+# $TAG - bloqueio temporário de POST multipart (PHP2Shell CVE-2026-109618 / CVE-2026-109619)
+# Mitigação PARCIAL: quebra uploads. Para remover: php2shell.sh unblock
+# allowlist (upload liberado): ${PHP2SHELL_UPLOAD_PATHS:-(nenhum)}
+<If "$expr">
+    Require all denied
+</If>
+EOF
+}
+
+nginx_block_snippet() {
+	local p
+	cat <<'EOF'
+# --- cole dentro de cada bloco server {} que serve PHP (nginx não aplica global com segurança) ---
+    set $p2s_block "";
+    if ($request_method = POST) { set $p2s_block "M"; }
+    if ($http_content_type ~* "^\s*multipart/") { set $p2s_block "${p2s_block}M"; }
+EOF
+	for p in ${PHP2SHELL_UPLOAD_PATHS:-}; do
+		printf '    location ^~ %s { set $p2s_block ""; try_files $uri $uri/ /index.php?$query_string; }\n' "$p"
+	done
+	cat <<'EOF'
+    if ($p2s_block = "MM") { return 403; }
+# --- fim ---  depois: nginx -t && nginx -s reload
+EOF
+}
+
+do_block() {
+	local dir f
+	need_root block
+	printf '%sBloqueando POST multipart (mitigação parcial, quebra uploads)%s\n' "$B" "$N"
+	if [ -n "${PHP2SHELL_UPLOAD_PATHS:-}" ]; then
+		ok "upload liberado em: $PHP2SHELL_UPLOAD_PATHS"
+	else
+		warn "sem allowlist: TODO upload do site vai parar. Para liberar rotas: PHP2SHELL_UPLOAD_PATHS=\"/upload /wp-admin\" $0 block"
+	fi
+	dir=$(apache_conf_dir)
+	if [ -n "$dir" ]; then
+		f="$dir/$BLOCK_NAME"
+		if apache_block_conf > "$f"; then ok "criado $f"; reload_apache; else bad "falhou ao escrever $f"; fi
+	else
+		warn "não achei diretório de config do Apache nesta máquina"
+	fi
+	if procs | grep -q '^[0-9]*|[^|]*|nginx|' || command -v nginx >/dev/null 2>&1; then
+		warn "nginx detectado: o bloqueio dele não é automático. Cole o trecho abaixo e recarregue:"
+		nginx_block_snippet
+	fi
+}
+
+do_unblock() {
+	local dir f n=0
+	need_root unblock
+	printf '%sRemovendo o bloqueio de multipart%s\n' "$B" "$N"
+	for dir in /etc/apache2/conf-enabled /etc/httpd/conf.d /usr/local/apache2/conf/extra; do
+		f="$dir/$BLOCK_NAME"
+		[ -f "$f" ] && rm -f "$f" && ok "removido $f" && n=$((n + 1))
+	done
+	if [ "$n" -gt 0 ]; then reload_apache; else echo "  nada do Apache para remover"; fi
+	command -v nginx >/dev/null 2>&1 && warn "se você colou o trecho no nginx, remova-o à mão e rode: nginx -t && nginx -s reload"
+}
+
 # ---------- containers ----------
 
 do_docker() {
 	local action="${1:-check}" rt list c rc worst=0 n=0
 	[ $# -gt 0 ] && shift
-	case $action in check | fix | undo) ;; *) die "uso: $0 docker check|fix|undo [container...]" ;; esac
+	list=$*
+	case $action in check | fix | undo | block | unblock) ;; *) die "uso: $0 docker check|fix|undo|block|unblock [container...]" ;; esac
 	rt=$(command -v docker 2>/dev/null || command -v podman 2>/dev/null) || die "docker/podman não encontrado"
 	[ -f "$0" ] || die "no modo docker rode a partir do arquivo (não via pipe)"
-	if [ $# -gt 0 ]; then list=$*; else list=$("$rt" ps --format '{{.Names}}'); fi
+	[ -n "$list" ] || list=$("$rt" ps --format '{{.Names}}')
 	for c in $list; do
 		"$rt" exec "$c" sh -c 'for f in /usr/local/sbin/php-fpm /usr/sbin/php-fpm* /usr/local/bin/php /usr/bin/php*; do [ -x "$f" ] && exit 0; done; exit 1' \
 			</dev/null >/dev/null 2>&1 || continue
 		n=$((n + 1))
 		printf '\n%s===== container %s =====%s\n' "$B" "$c" "$N"
-		if [ -n "${PHP2SHELL_FIXED:-}" ]; then
-			"$rt" exec -u 0 -i -e "PHP2SHELL_FIXED=$PHP2SHELL_FIXED" "$c" sh -s -- "$action" < "$0"; rc=$?
-		else
-			"$rt" exec -u 0 -i "$c" sh -s -- "$action" < "$0"; rc=$?
-		fi
+		set -- -u 0 -i
+		[ -n "${PHP2SHELL_FIXED:-}" ] && set -- "$@" -e "PHP2SHELL_FIXED=$PHP2SHELL_FIXED"
+		[ -n "${PHP2SHELL_UPLOAD_PATHS:-}" ] && set -- "$@" -e "PHP2SHELL_UPLOAD_PATHS=$PHP2SHELL_UPLOAD_PATHS"
+		"$rt" exec "$@" "$c" sh -s -- "$action" < "$0"; rc=$?
 		[ "$rc" -gt "$worst" ] && worst=$rc
 	done
 	[ "$n" -gt 0 ] || echo "Nenhum container com PHP em execução."
@@ -541,6 +648,8 @@ case ${1:-check} in
 check) do_check ;;
 fix) do_fix ;;
 undo) do_undo ;;
+block) do_block ;;
+unblock) do_unblock ;;
 docker) shift; do_docker "$@" ;;
 -h | --help | help) usage ;;
 *) usage; exit 4 ;;
