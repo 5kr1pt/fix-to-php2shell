@@ -9,12 +9,19 @@ A script to check whether a server's PHP is exposed to PHP2Shell, apply the temp
 ## Quick start
 
 ```sh
+# 1. get the script
 curl -fsSLO https://raw.githubusercontent.com/5kr1pt/fix-to-php2shell/main/php2shell.sh
 
-sh php2shell.sh check        # diagnosis only, changes nothing
-# update PHP (check prints the exact command for your distro), then:
-sh php2shell.sh check        # must end with RESULTADO: CORRIGIDO
+# 2. diagnose (read-only, changes nothing). It prints the exact update command for your distro.
+sh php2shell.sh check
+
+# 3. update PHP to 8.2.35 / 8.3.36 / 8.4.27 / 8.5.12 (run the command step 2 printed)
+
+# 4. confirm the update took — must end with RESULTADO: CORRIGIDO
+sh php2shell.sh check
 ```
+
+Two `check` runs on purpose: step 2 tells you if you're exposed, step 4 verifies the patch landed.
 
 If you genuinely can't patch this minute, apply a stopgap (`block` is the broader one, see below), then patch as soon as you can.
 
